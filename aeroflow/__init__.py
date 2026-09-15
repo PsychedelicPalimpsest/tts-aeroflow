@@ -39,6 +39,15 @@ from aeroflow.dataset.dataset import (
     collate_hifi_tts,
     create_synthetic_batch
 )
+from aeroflow.dataset.hf_hifi_tts import (
+    HF_REPO_FULL,
+    HF_REPO_LIGHT,
+    HF_NATIVE_SAMPLE_RATE,
+    HuggingFaceHiFiTTSDataset,
+    StreamingHiFiTTSDataset,
+    create_hifi_tts_dataset,
+    process_hf_row
+)
 
 __version__ = "2.0.0"
 __all__ = [
@@ -64,6 +73,13 @@ __all__ = [
     "MultiResolutionSTFTLoss",
     "InstantaneousFrequencyLoss",
     "HiFiTTSDataset",
+    "HuggingFaceHiFiTTSDataset",
+    "StreamingHiFiTTSDataset",
+    "create_hifi_tts_dataset",
+    "process_hf_row",
+    "HF_REPO_FULL",
+    "HF_REPO_LIGHT",
+    "HF_NATIVE_SAMPLE_RATE",
     "collate_hifi_tts",
     "create_synthetic_batch",
 ]

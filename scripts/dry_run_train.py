@@ -8,6 +8,7 @@ Targets:
 5. 6-step Non-Uniform Heun Solver inference benchmark on classic test sentences.
 """
 
+import argparse
 import os
 import sys
 import time
@@ -21,11 +22,53 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from aeroflow import (
     AeroFlowTTS,
     AeroFlowLoss,
+    HF_REPO_LIGHT,
+    HuggingFaceHiFiTTSDataset,
+    collate_hifi_tts,
     create_synthetic_batch
 )
 
 
-def main():
+def load_dry_run_batch(batch_size: int = 2):
+    """
+    Loads a real Speaker 9017 batch from the lightweight same-format repo
+    (``MikhailT/hifi-tts-light``, subset ``clean`` / split ``train``).
+
+    Returns ``(batch, source)`` where source is ``"hifi-tts-light"`` on
+    success. Any failure (missing ``datasets`` package, no network, empty
+    split) falls back to the synthetic Speaker 9017 batch (source
+    ``"synthetic"``) so the dry run stays runnable offline.
+    """
+    try:
+        ds = HuggingFaceHiFiTTSDataset(
+            repo_id=HF_REPO_LIGHT,
+            subset="clean",
+            split="train",
+            speaker_ids=("9017",),
+            sample_rate=24000,
+            hop_length=240,
+        )
+        if len(ds) == 0:
+            raise RuntimeError("light dataset split is empty after filtering")
+        n = min(batch_size, len(ds))
+        batch = collate_hifi_tts([ds[i] for i in range(n)])
+        return batch, "hifi-tts-light"
+    except Exception as exc:
+        print(f"  [Data Pipeline] Light HF dataset unavailable ({exc}); "
+              f"falling back to synthetic Speaker 9017 batch.")
+        return create_synthetic_batch(batch_size=batch_size), "synthetic"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="AeroFlow-v2 dry-run verification")
+    parser.add_argument("--dataset", type=str, default="light",
+                        choices=["light", "synthetic"],
+                        help="'light' (default): real Speaker 9017 batch from "
+                             "MikhailT/hifi-tts-light with synthetic fallback. "
+                             "'synthetic': force the synthetic batch.")
+    parser.add_argument("--batch-size", type=int, default=2)
+    args = parser.parse_args(argv)
+
     print("=" * 78)
     print("AEROFLOW-v2: SYSTEM VERIFICATION & DRY-RUN TRAINING HARNESS")
     print("Target Architecture: Intel Core i7-12700H (6 P-Cores, AVX2 SIMD)")
@@ -74,15 +117,17 @@ def main():
         weight_decay=0.01
     )
 
-    # 4. Generate Synthetic Speaker 9017 Batch
+    # 4. Load Speaker 9017 Batch (light HF dataset, synthetic fallback)
     print("\n" + "-" * 78)
-    print("[Data Pipeline] Generating synthetic 24 kHz Speaker 9017 batch...")
-    batch = create_synthetic_batch(
-        batch_size=2,
-        audio_dur_s=1.5,
-        sample_rate=24000,
-        hop_length=240
-    )
+    if args.dataset == "synthetic":
+        print("[Data Pipeline] Generating synthetic 24 kHz Speaker 9017 batch...")
+        batch = create_synthetic_batch(batch_size=args.batch_size)
+        source = "synthetic"
+    else:
+        print("[Data Pipeline] Loading real 24 kHz Speaker 9017 batch from "
+              "MikhailT/hifi-tts-light (clean/train)...")
+        batch, source = load_dry_run_batch(batch_size=args.batch_size)
+    print(f"  Batch source: {source}")
     tokens = batch["phoneme_tokens"].to(device)
     audio = batch["audio"].to(device)
     text_lens = batch["text_lengths"].to(device)

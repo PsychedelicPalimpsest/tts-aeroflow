@@ -41,9 +41,12 @@ from aeroflow import (
     AeroFlowTTS,
     AeroFlowLoss,
     HiFiTTSDataset,
+    HuggingFaceHiFiTTSDataset,
+    StreamingHiFiTTSDataset,
     collate_hifi_tts,
     create_synthetic_batch
 )
+from torch.utils.data import IterableDataset
 
 
 class SyntheticHiFiTTSDataset(Dataset):
@@ -249,6 +252,25 @@ def train():
     parser = argparse.ArgumentParser(description="AeroFlow-v2 Kaggle 2x T4 DDP Training")
     parser.add_argument("--manifest-path", type=str, default=None, help="Path to Hi-Fi TTS JSON manifest")
     parser.add_argument("--audio-dir", type=str, default=None, help="Directory containing audio files")
+    parser.add_argument("--dataset-source", type=str, default="auto",
+                        choices=["auto", "manifest", "hf", "hf-streaming", "synthetic"],
+                        help="Dataset backend: 'manifest' (local JSON), 'hf' (lazy map over "
+                             "MikhailT/hifi-tts, Arrow memory-mapped, one-row RAM), "
+                             "'hf-streaming' (streaming=True, no local copy, O(1) RAM), "
+                             "'synthetic' (fallback), or 'auto' (manifest if found else synthetic)")
+    parser.add_argument("--hf-repo-id", type=str, default="MikhailT/hifi-tts",
+                        help="HF repo for --dataset-source hf/hf-streaming "
+                             "(use MikhailT/hifi-tts-light for small-format testing)")
+    parser.add_argument("--hf-subset", type=str, default="clean",
+                        help="HF config: 'clean', 'other', or 'all'")
+    parser.add_argument("--hf-split", type=str, default="train",
+                        help="HF split: 'train'/'test'/'dev' for clean/other, "
+                             "or 'train.clean'/'train.other'/... for subset 'all'")
+    parser.add_argument("--hf-speaker", type=str, default="9017",
+                        help="Comma-separated speaker id(s) to keep (default '9017' single-voice). "
+                             "Use 'all' for every speaker.")
+    parser.add_argument("--hf-min-duration", type=float, default=0.5)
+    parser.add_argument("--hf-max-duration", type=float, default=12.0)
     parser.add_argument("--checkpoint-dir", type=str, default="/kaggle/working/checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--resume-path", type=str, default=None, help="Explicit checkpoint path to resume from")
     parser.add_argument("--auto-resume", action="store_true", default=True, help="Auto-search for existing checkpoints")
@@ -277,32 +299,78 @@ def train():
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # 2. Dataset & DataLoader (4-vCPU balanced: 2 workers per GPU process)
-    if args.manifest_path and os.path.exists(args.manifest_path):
-        if is_master:
-            print(f"[Dataset] Loading Hi-Fi TTS manifest: {args.manifest_path}")
-        dataset = HiFiTTSDataset(
-            manifest_path=args.manifest_path,
-            audio_dir=args.audio_dir,
+    # Backends share the same collate format so this is a pure switch-out.
+    source = args.dataset_source
+    if source == "auto":
+        source = "manifest" if (args.manifest_path and os.path.exists(args.manifest_path)) else "synthetic"
+
+    is_streaming = False
+    if source == "manifest":
+        if args.manifest_path and os.path.exists(args.manifest_path):
+            if is_master:
+                print(f"[Dataset] Loading Hi-Fi TTS manifest: {args.manifest_path}")
+            dataset = HiFiTTSDataset(
+                manifest_path=args.manifest_path,
+                audio_dir=args.audio_dir,
+                sample_rate=24000,
+                hop_length=240
+            )
+        else:
+            if is_master:
+                print(f"[Dataset] Manifest not specified or not found. Using SyntheticHiFiTTSDataset ({args.synthetic_samples} items).")
+            dataset = SyntheticHiFiTTSDataset(
+                num_samples=args.synthetic_samples,
+                sample_rate=24000,
+                hop_length=240
+            )
+    elif source in ("hf", "hf-streaming"):
+        speaker_arg = (args.hf_speaker or "").strip().lower()
+        speaker_ids = None if speaker_arg in ("", "all", "none") else [s.strip() for s in args.hf_speaker.split(",")]
+        hf_common = dict(
+            repo_id=args.hf_repo_id,
+            subset=args.hf_subset,
+            split=args.hf_split,
+            speaker_ids=speaker_ids,
             sample_rate=24000,
-            hop_length=240
+            hop_length=240,
+            min_duration_s=args.hf_min_duration,
+            max_duration_s=args.hf_max_duration,
         )
+        if source == "hf":
+            if is_master:
+                print(f"[Dataset] Loading lazy HF map dataset: {args.hf_repo_id} "
+                      f"(subset={args.hf_subset}, split={args.hf_split}, speakers={speaker_ids}). "
+                      f"Arrow memory-mapped, audio decoded one row at a time (40GB never in RAM).")
+            dataset = HuggingFaceHiFiTTSDataset(**hf_common)
+        else:
+            if is_master:
+                print(f"[Dataset] Loading HF streaming dataset: {args.hf_repo_id} "
+                      f"(subset={args.hf_subset}, split={args.hf_split}, speakers={speaker_ids}). "
+                      f"streaming=True, no local copy, O(1) RAM.")
+            dataset = StreamingHiFiTTSDataset(
+                **hf_common, rank=rank, world_size=world_size,
+            )
+            is_streaming = True
+        if is_master:
+            print(f"[Dataset] HF backend ready ({len(dataset) if not is_streaming else 'streaming'} rows). "
+                  f"For format testing use --hf-repo-id MikhailT/hifi-tts-light.")
     else:
         if is_master:
-            print(f"[Dataset] Manifest not specified or not found. Using SyntheticHiFiTTSDataset ({args.synthetic_samples} items).")
+            print(f"[Dataset] Using SyntheticHiFiTTSDataset ({args.synthetic_samples} items).")
         dataset = SyntheticHiFiTTSDataset(
             num_samples=args.synthetic_samples,
             sample_rate=24000,
             hop_length=240
         )
 
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if (is_distributed and not isinstance(dataset, IterableDataset)) else None
     use_cuda = device.type == "cuda"
     num_workers = 2 if use_cuda else 0
 
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        shuffle=(sampler is None),
+        shuffle=(sampler is None and not isinstance(dataset, IterableDataset)),
         sampler=sampler,
         num_workers=num_workers,
         pin_memory=use_cuda,

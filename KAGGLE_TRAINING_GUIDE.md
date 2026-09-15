@@ -53,7 +53,26 @@ Expected directory structure:
       └── ...
 ```
 
-### Option B: Synthetic Dataset Verification (No Dataset Required)
+### Option B: HuggingFace Dataset (no manual download, lazy 40 GB-safe)
+`train_kaggle.py --dataset-source hf` streams directly from `MikhailT/hifi-tts`
+without ever holding the 40 GB corpus in RAM (Arrow memory-mapped, one row
+decoded per `__getitem__`); `--dataset-source hf-streaming` goes further with
+`streaming=True` (no local copy, O(1) RAM). For format testing use the small
+same-format repo `MikhailT/hifi-tts-light`:
+```bash
+torchrun --nproc_per_node=2 scripts/train_kaggle.py \
+    --dataset-source hf-streaming \
+    --hf-repo-id MikhailT/hifi-tts \
+    --hf-subset clean --hf-split train --hf-speaker 9017 \
+    --checkpoint-dir "/kaggle/working/checkpoints" \
+    --batch-size 16 --epochs 100 --max-hours 11.2 --auto-resume
+```
+Requires `pip install -q "datasets[audio]"` (see Cell 2). Subsets: `clean` /
+`other` with splits `train`/`test`/`dev`, or subset `all` with splits
+`train.clean`, `train.other`, `test.clean`, `test.other`, `dev.clean`,
+`dev.other`. `--hf-speaker all` keeps every speaker.
+
+### Option C: Synthetic Dataset Verification (No Dataset Required)
 If no external dataset is mounted, omitting `--manifest-path` automatically triggers the built-in `SyntheticHiFiTTSDataset` which generates synthetic 24 kHz baritone audio matching Speaker 9017 acoustic characteristics for immediate dry-run and stress verification.
 
 ---
@@ -86,7 +105,7 @@ os.environ["OMP_NUM_THREADS"] = "2"
 # If running directly from git or Kaggle dataset
 !git clone https://github.com/your-org/ttx.git /kaggle/working/ttx || echo "Already cloned or present"
 %cd /kaggle/working/ttx
-!pip install -q soundfile
+!pip install -q soundfile "datasets[audio]"
 ```
 
 ---
