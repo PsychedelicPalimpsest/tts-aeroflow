@@ -38,11 +38,20 @@ Output item format matches :class:`HiFiTTSDataset` so the existing
 
     {"tokens": LongTensor, "audio": FloatTensor @ 24kHz,
      "text": str, "speaker": str, "file": str}
+
+Storage note (Kaggle): ``/kaggle/working`` is only ~20 GB while the full
+corpus cache is ~40 GB. Both adapters therefore resolve a ``None``
+``cache_dir`` to ``/kaggle/tmp/hf_cache`` whenever ``/kaggle/tmp`` exists
+(see :func:`default_hf_cache_dir`), keeping checkpoints (small, must
+persist) in ``/kaggle/working`` and the bulky ephemeral parquet cache on
+``/kaggle/tmp`` scratch. Pass an explicit ``cache_dir`` (or set
+``KAGGLE_TMP_DIR``) to override.
 """
 
 from __future__ import annotations
 
 import itertools
+import os
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -56,10 +65,20 @@ HF_REPO_LIGHT = "MikhailT/hifi-tts-light"
 
 HF_NATIVE_SAMPLE_RATE = 44100
 
+#: Kaggle scratch mount used for the bulky ephemeral HF cache
+#: (``/kaggle/working`` at ~20 GB cannot hold the ~40 GB corpus cache).
+KAGGLE_TMP_DIR = "/kaggle/tmp"
+
+#: Subdirectory of the Kaggle scratch mount holding the HF datasets cache.
+HF_CACHE_SUBDIR = "hf_cache"
+
 __all__ = [
     "HF_REPO_FULL",
     "HF_REPO_LIGHT",
     "HF_NATIVE_SAMPLE_RATE",
+    "KAGGLE_TMP_DIR",
+    "HF_CACHE_SUBDIR",
+    "default_hf_cache_dir",
     "HuggingFaceHiFiTTSDataset",
     "StreamingHiFiTTSDataset",
     "create_hifi_tts_dataset",
@@ -68,6 +87,30 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
+# Shared pure-python helpers (no `datasets` dependency -> unit testable)
+# ---------------------------------------------------------------------------
+
+def default_hf_cache_dir() -> Optional[str]:
+    """
+    Returns the preferred HF datasets cache directory, or None for default.
+
+    On Kaggle (``/kaggle/tmp`` present, override via ``KAGGLE_TMP_DIR`` env)
+    this is ``/kaggle/tmp/hf_cache`` so the ~40 GB corpus cache lands on
+    scratch instead of overflowing the ~20 GB ``/kaggle/working`` mount.
+    Off Kaggle, returns None (use the standard HF cache location).
+    """
+    kaggle_tmp = os.environ.get("KAGGLE_TMP_DIR", KAGGLE_TMP_DIR)
+    if kaggle_tmp and os.path.isdir(kaggle_tmp):
+        return os.path.join(kaggle_tmp, HF_CACHE_SUBDIR)
+    return None
+
+
+def _resolve_cache_dir(cache_dir: Optional[str] = None) -> Optional[str]:
+    """Resolves an explicit ``cache_dir`` or the Kaggle-aware default (created)."""
+    resolved = cache_dir or default_hf_cache_dir()
+    if resolved:
+        os.makedirs(resolved, exist_ok=True)
+    return resolved
 # Shared pure-python helpers (no `datasets` dependency -> unit testable)
 # ---------------------------------------------------------------------------
 
@@ -250,7 +293,10 @@ class HuggingFaceHiFiTTSDataset(Dataset):
         hop_length: audio truncated to a multiple of this (model needs 240).
         min_duration_s / max_duration_s: metadata pre-filter bounds.
         text_field: preferred transcript column (fallback chain built in).
-        cache_dir / token: forwarded to ``load_dataset``.
+        cache_dir / token: forwarded to ``load_dataset``. A None cache_dir
+            auto-resolves to ``/kaggle/tmp/hf_cache`` on Kaggle (see
+            :func:`default_hf_cache_dir`) so the ~40 GB cache does not
+            overflow the ~20 GB ``/kaggle/working`` mount.
     """
 
     def __init__(
@@ -286,10 +332,11 @@ class HuggingFaceHiFiTTSDataset(Dataset):
         self.max_duration_s = max_duration_s
         self.text_field = text_field
         self.phonemizer = Phonemizer()
+        self.cache_dir = _resolve_cache_dir(cache_dir)
 
         load_kwargs: Dict[str, Any] = {"trust_remote_code": False}
-        if cache_dir is not None:
-            load_kwargs["cache_dir"] = cache_dir
+        if self.cache_dir is not None:
+            load_kwargs["cache_dir"] = self.cache_dir
         if token is not None:
             load_kwargs["token"] = token
 
@@ -411,7 +458,7 @@ class StreamingHiFiTTSDataset(IterableDataset):
         self.text_field = text_field
         self.rank = rank
         self.world_size = max(1, world_size)
-        self.cache_dir = cache_dir
+        self.cache_dir = _resolve_cache_dir(cache_dir)
         self.token = token
         self.phonemizer = Phonemizer()
 

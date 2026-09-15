@@ -72,6 +72,16 @@ Requires `pip install -q "datasets[audio]"` (see Cell 2). Subsets: `clean` /
 `train.clean`, `train.other`, `test.clean`, `test.other`, `dev.clean`,
 `dev.other`. `--hf-speaker all` keeps every speaker.
 
+> [!IMPORTANT]
+> **Storage layout:** `/kaggle/working` is only ~20 GB but the full corpus
+> cache is ~40 GB. `train_kaggle.py` therefore creates `/kaggle/tmp` scratch
+> at startup and routes the HF cache there (`/kaggle/tmp/hf_cache` by default;
+> override with `--hf-cache-dir`). Checkpoints stay in
+> `/kaggle/working/checkpoints` so they persist as session output, while
+> `/kaggle/tmp` is ephemeral — each new session re-downloads the cache, then
+> auto-resumes from the attached prior checkpoint. If even scratch space is
+> tight, prefer `--dataset-source hf-streaming` (no local copy at all).
+
 ### Option C: Synthetic Dataset Verification (No Dataset Required)
 If no external dataset is mounted, omitting `--manifest-path` automatically triggers the built-in `SyntheticHiFiTTSDataset` which generates synthetic 24 kHz baritone audio matching Speaker 9017 acoustic characteristics for immediate dry-run and stress verification.
 

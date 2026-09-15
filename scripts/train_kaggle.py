@@ -19,9 +19,20 @@ os.environ["NCCL_P2P_DISABLE"] = "1"
 os.environ["NCCL_IB_DISABLE"] = "1"
 os.environ["OMP_NUM_THREADS"] = "2"
 
+# 1b. Kaggle storage layout: /kaggle/working is only ~20 GB while the full
+# HF corpus cache is ~40 GB. Create /kaggle/tmp scratch and point all
+# HuggingFace caches at it (checkpoints stay in /kaggle/working so they
+# persist as session output; /kaggle/tmp is ephemeral per session).
+if os.path.isdir("/kaggle"):
+    os.makedirs("/kaggle/tmp", exist_ok=True)
+    os.environ.setdefault("HF_DATASETS_CACHE", "/kaggle/tmp/hf_cache")
+    os.environ.setdefault("HF_HUB_CACHE", "/kaggle/tmp/hub")
+    os.environ.setdefault("HF_HOME", "/kaggle/tmp/hf_home")
+
 import argparse
 import glob
 import math
+import shutil
 from pathlib import Path
 import random
 import time
@@ -44,7 +55,8 @@ from aeroflow import (
     HuggingFaceHiFiTTSDataset,
     StreamingHiFiTTSDataset,
     collate_hifi_tts,
-    create_synthetic_batch
+    create_synthetic_batch,
+    default_hf_cache_dir,
 )
 from torch.utils.data import IterableDataset
 
@@ -271,6 +283,10 @@ def train():
                              "Use 'all' for every speaker.")
     parser.add_argument("--hf-min-duration", type=float, default=0.5)
     parser.add_argument("--hf-max-duration", type=float, default=12.0)
+    parser.add_argument("--hf-cache-dir", type=str, default=None,
+                        help="HF datasets cache dir. Default auto-resolves to "
+                             "/kaggle/tmp/hf_cache on Kaggle (the ~40 GB corpus "
+                             "cache does not fit the ~20 GB /kaggle/working).")
     parser.add_argument("--checkpoint-dir", type=str, default="/kaggle/working/checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--resume-path", type=str, default=None, help="Explicit checkpoint path to resume from")
     parser.add_argument("--auto-resume", action="store_true", default=True, help="Auto-search for existing checkpoints")
@@ -335,6 +351,7 @@ def train():
             hop_length=240,
             min_duration_s=args.hf_min_duration,
             max_duration_s=args.hf_max_duration,
+            cache_dir=args.hf_cache_dir,  # None -> /kaggle/tmp/hf_cache on Kaggle
         )
         if source == "hf":
             if is_master:
@@ -352,8 +369,22 @@ def train():
             )
             is_streaming = True
         if is_master:
+            cache_dir = dataset.cache_dir or default_hf_cache_dir()
             print(f"[Dataset] HF backend ready ({len(dataset) if not is_streaming else 'streaming'} rows). "
                   f"For format testing use --hf-repo-id MikhailT/hifi-tts-light.")
+            print(f"[Dataset] HF cache dir: {cache_dir or '(HF default)'}")
+            # /kaggle/working is only ~20 GB; the full corpus cache is ~40 GB.
+            # Fail fast with a pointer instead of dying mid-download on ENOSPC.
+            if not is_streaming and "hifi-tts-light" not in args.hf_repo_id and cache_dir:
+                try:
+                    free_gb = shutil.disk_usage(cache_dir).free / (1024 ** 3)
+                    print(f"[Dataset] Cache mount free space: {free_gb:.1f} GB")
+                    if free_gb < 42.0:
+                        print(f"  [WARNING] <42 GB free for the ~40 GB corpus cache! "
+                              f"Use --dataset-source hf-streaming (no local copy) or "
+                              f"point --hf-cache-dir at /kaggle/tmp scratch.")
+                except OSError as exc:
+                    print(f"  [WARNING] Could not check cache disk space: {exc}")
     else:
         if is_master:
             print(f"[Dataset] Using SyntheticHiFiTTSDataset ({args.synthetic_samples} items).")

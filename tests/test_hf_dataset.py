@@ -21,8 +21,10 @@ from aeroflow.dataset.hf_hifi_tts import (
     _normalize_speaker_ids,
     _peak_normalize,
     _resample_mono,
+    _resolve_cache_dir,
     _row_passes_filter,
     create_hifi_tts_dataset,
+    default_hf_cache_dir,
     process_hf_row,
 )
 from aeroflow.frontend.phonemizer import Phonemizer
@@ -91,6 +93,29 @@ def test_row_filter_bounds():
     assert not _row_passes_filter("9017", 13.5, "hi", ("9017",), 0.5, 12.0)
     assert not _row_passes_filter("9017", 1.0, "", ("9017",), 0.5, 12.0)
     assert _row_passes_filter("92", 1.0, "hi", None, 0.5, 12.0)
+
+
+def test_default_hf_cache_dir_kaggle_scratch(monkeypatch, tmp_path):
+    """On Kaggle the cache must resolve to /kaggle/tmp scratch, not /kaggle/working."""
+    monkeypatch.setenv("KAGGLE_TMP_DIR", str(tmp_path))
+    resolved = default_hf_cache_dir()
+    assert resolved == str(tmp_path / "hf_cache")
+    # _resolve_cache_dir creates it
+    assert _resolve_cache_dir() == resolved
+    assert (tmp_path / "hf_cache").is_dir()
+
+
+def test_default_hf_cache_dir_off_kaggle(monkeypatch):
+    monkeypatch.setenv("KAGGLE_TMP_DIR", "/nonexistent-kaggle-tmp-xyz")
+    assert default_hf_cache_dir() is None
+    assert _resolve_cache_dir() is None
+
+
+def test_resolve_cache_dir_explicit_wins(monkeypatch, tmp_path):
+    monkeypatch.setenv("KAGGLE_TMP_DIR", str(tmp_path))
+    explicit = str(tmp_path / "custom")
+    assert _resolve_cache_dir(explicit) == explicit
+    assert (tmp_path / "custom").is_dir()
 
 
 def test_process_hf_row_dict_audio():
