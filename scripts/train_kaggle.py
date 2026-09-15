@@ -239,6 +239,12 @@ def resume_from_checkpoint(
     """
     checkpoint = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
 
+    if "model" not in checkpoint or "optimizer" not in checkpoint:
+        raise ValueError(
+            f"{checkpoint_path} is not an AeroFlow checkpoint "
+            f"(keys: {sorted(checkpoint.keys())}); refusing to resume into it."
+        )
+
     raw_model = model.module if is_distributed else model
     raw_model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["optimizer"])
@@ -253,20 +259,60 @@ def resume_from_checkpoint(
     epoch = checkpoint.get("epoch", 0)
     best_loss = checkpoint.get("best_loss", float("inf"))
 
-    rng = checkpoint.get("rng_state", {})
-    if "cpu" in rng:
-        torch.set_rng_state(rng["cpu"])
-    if "numpy" in rng:
-        np.random.set_state(rng["numpy"])
-    if "python" in rng:
-        random.setstate(rng["python"])
-    if torch.cuda.is_available() and "cuda" in rng:
-        try:
-            torch.cuda.set_rng_state_all(rng["cuda"])
-        except Exception:
-            pass
+    _restore_rng_states(checkpoint.get("rng_state", {}))
 
     return global_step, epoch, best_loss
+
+
+def _restore_rng_states(rng: Any) -> None:
+    """
+    Restores CPU/CUDA/NumPy/Python RNG states defensively.
+
+    Checkpoints written by older code (or foreign ``checkpoint_latest.pt``
+    files picked up by auto-resume) may store these in unexpected shapes.
+    Every entry is coerced when possible and skipped with a warning otherwise:
+    exact RNG replay is nice-to-have, but it must never fail startup.
+    """
+    if not isinstance(rng, dict):
+        print(f"  [Checkpoint] Skipping RNG restore: unexpected rng_state "
+              f"type {type(rng).__name__}.")
+        return
+
+    cpu_state = rng.get("cpu")
+    if cpu_state is not None:
+        coerced = None
+        if isinstance(cpu_state, torch.Tensor):
+            coerced = cpu_state.detach().to(device="cpu", dtype=torch.uint8)
+        elif isinstance(cpu_state, (bytes, bytearray)):
+            coerced = torch.frombuffer(bytearray(cpu_state), dtype=torch.uint8)
+        if coerced is not None:
+            try:
+                torch.set_rng_state(coerced)
+            except Exception as exc:
+                print(f"  [Checkpoint] Skipping CPU RNG restore ({exc}).")
+        else:
+            print(f"  [Checkpoint] Skipping CPU RNG restore: unexpected stored "
+                  f"type {type(cpu_state).__name__}.")
+
+    numpy_state = rng.get("numpy")
+    if numpy_state is not None:
+        try:
+            np.random.set_state(numpy_state)
+        except Exception as exc:
+            print(f"  [Checkpoint] Skipping NumPy RNG restore ({exc}).")
+
+    python_state = rng.get("python")
+    if python_state is not None:
+        try:
+            random.setstate(python_state)
+        except Exception as exc:
+            print(f"  [Checkpoint] Skipping Python RNG restore ({exc}).")
+
+    if torch.cuda.is_available() and rng.get("cuda") is not None:
+        try:
+            torch.cuda.set_rng_state_all(rng["cuda"])
+        except Exception as exc:
+            print(f"  [Checkpoint] Skipping CUDA RNG restore ({exc}).")
 
 
 #: Fixed prompts synthesized for listening checks during training.
