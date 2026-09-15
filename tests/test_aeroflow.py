@@ -307,3 +307,48 @@ def test_attention_mask_fp16_no_overflow():
     assert out.dtype == torch.float16
     assert torch.isfinite(out.float()).all()
 
+
+def _brute_force_mas(scores, n_len, t_len):
+    """Obviously-correct scalar DP reference (tiny inputs only)."""
+    NEG = -1e9
+    n_len = min(n_len, t_len)
+    Q = [[NEG] * t_len for _ in range(n_len)]
+    bt = [[0] * t_len for _ in range(n_len)]
+    Q[0][0] = scores[0][0]
+    for t in range(1, t_len):
+        n_min = max(0, n_len - (t_len - t))
+        n_max = min(t + 1, n_len)
+        if n_min == 0:
+            Q[0][t] = Q[0][t - 1] + scores[0][t]
+        for n in range(max(n_min, 1), n_max):
+            stay, step = Q[n][t - 1], Q[n - 1][t - 1]
+            if stay >= step:
+                Q[n][t] = stay + scores[n][t]
+            else:
+                Q[n][t] = step + scores[n][t]
+                bt[n][t] = 1
+    path = [[0.0] * t_len for _ in range(n_len)]
+    c = n_len - 1
+    for t in range(t_len - 1, -1, -1):
+        path[c][t] = 1.0
+        if t > 0 and bt[c][t] == 1:
+            c -= 1
+    return path
+
+
+def test_mas_matches_brute_force():
+    """Vectorized MAS must match an independent scalar reference exactly."""
+    torch.manual_seed(7)
+    cases = [(2, 4, 7), (3, 5, 5), (1, 1, 1), (4, 6, 9)]
+    for B, N, T in cases:
+        scores = ((torch.randn(B, N, T) * 4).round() / 4)  # force ties
+        tl = torch.randint(1, N + 1, (B,))
+        al = torch.randint(1, T + 1, (B,))
+        got = maximum_path_viterbi(scores, tl, al)
+        for b in range(B):
+            nl = min(int(tl[b]), int(al[b]))
+            ref = _brute_force_mas(scores[b].tolist(), int(tl[b]), int(al[b]))
+            exp = torch.zeros(N, T)
+            exp[:nl, : int(al[b])] = torch.tensor(ref)
+            assert torch.equal(got[b], exp), f"mismatch B={B} N={N} T={T} b={b}"
+
