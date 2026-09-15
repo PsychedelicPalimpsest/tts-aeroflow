@@ -228,7 +228,7 @@ def _make_lazy_map_instance(rows, **kwargs):
     ds.phonemizer = Phonemizer()
     fake = _FakeHFTable(rows)
     ds._hf = fake
-    ds._index = HuggingFaceHiFiTTSDataset._build_metadata_index(ds, fake)
+    HuggingFaceHiFiTTSDataset._build_metadata_index(ds, fake)
     return ds, fake
 
 

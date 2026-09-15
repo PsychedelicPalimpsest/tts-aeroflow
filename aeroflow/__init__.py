@@ -51,6 +51,7 @@ from aeroflow.dataset.hf_hifi_tts import (
     create_hifi_tts_dataset,
     process_hf_row
 )
+from aeroflow.dataset.bucket import BucketBatchSampler, dataset_lengths
 
 __version__ = "2.0.0"
 __all__ = [
@@ -86,6 +87,8 @@ __all__ = [
     "KAGGLE_TMP_DIR",
     "HF_CACHE_SUBDIR",
     "default_hf_cache_dir",
+    "BucketBatchSampler",
+    "dataset_lengths",
     "collate_hifi_tts",
     "create_synthetic_batch",
 ]

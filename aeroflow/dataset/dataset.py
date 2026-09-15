@@ -43,9 +43,27 @@ class HiFiTTSDataset(Dataset):
         self.min_samples = int(min_duration_s * sample_rate)
         self.phonemizer = Phonemizer()
         self.items: List[Dict[str, Any]] = []
+        self._lengths_cache: Optional[List[int]] = None
 
         if manifest_path and os.path.exists(manifest_path):
             self._load_manifest(manifest_path, audio_dir)
+
+    def get_audio_lengths(self) -> List[int]:
+        """
+        Per-item audio lengths in samples for length-bucketed batching.
+        Header-only scan (no audio decoded); cached after the first call.
+        Lengths are at the file's native rate (order-preserving, which is
+        all bucketing needs).
+        """
+        if self._lengths_cache is None:
+            lengths = []
+            for item in self.items:
+                try:
+                    lengths.append(int(sf.info(item["audio_path"]).frames))
+                except Exception:
+                    lengths.append(0)
+            self._lengths_cache = lengths
+        return list(self._lengths_cache)
 
     def _load_manifest(self, manifest_path: Union[str, Path], audio_dir: Optional[Union[str, Path]]):
         manifest_path = Path(manifest_path)

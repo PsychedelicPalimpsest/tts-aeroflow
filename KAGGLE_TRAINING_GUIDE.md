@@ -92,6 +92,10 @@ pipeline is the bottleneck:
 4. **Tune `--num-workers` / `--prefetch-factor`.** Defaults (2 workers/GPU,
    prefetch 2) match the 4-vCPU host; with slow storage try
    `--prefetch-factor 4` to deepen the queue.
+5. **Leave `--bucket-batches` on (default).** Similar-length clips share a
+   batch, so padding waste collapses (measured x1.01 vs x1.35 random on
+   1–2 s clips; far bigger on 0.5–12 s speech) and step times stop swinging
+   with batch composition. Disable with `--no-bucket-batches`.
 
 > [!IMPORTANT]
 > **Storage layout:** `/kaggle/working` is only ~20 GB but the full corpus

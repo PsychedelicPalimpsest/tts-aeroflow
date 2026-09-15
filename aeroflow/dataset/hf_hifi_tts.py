@@ -342,12 +342,16 @@ class HuggingFaceHiFiTTSDataset(Dataset):
 
         hf_ds = load_dataset(repo_id, subset, split=split, streaming=False, **load_kwargs)
         self._hf = hf_ds
-        self._index: List[int] = self._build_metadata_index(hf_ds)
+        self._index: List[int] = []
+        self._lengths: List[int] = []  # resampled audio lengths, index-aligned
+        self._build_metadata_index(hf_ds)
 
-    def _build_metadata_index(self, hf_ds: Any) -> List[int]:
+    def _build_metadata_index(self, hf_ds: Any) -> None:
         """
         Scans only metadata columns in batches (never touches `audio` bytes).
-        Batched slicing keeps init fast even for 324k rows.
+        Batched slicing keeps init fast even for 324k rows. Fills `self._index`
+        (HF row ids) and `self._lengths` (estimated resampled audio lengths in
+        samples, for length-bucketed batching).
         """
         speaker_ids = self.speaker_ids
         col_names: List[str] = list(getattr(hf_ds, "column_names", []) or [])
@@ -360,6 +364,7 @@ class HuggingFaceHiFiTTSDataset(Dataset):
 
         total = len(meta)
         index: List[int] = []
+        lengths: List[int] = []
         batch_size = 5000
         for start in range(0, total, batch_size):
             chunk = meta[start: start + batch_size]
@@ -384,7 +389,10 @@ class HuggingFaceHiFiTTSDataset(Dataset):
                     speaker_ids, self.min_duration_s, self.max_duration_s,
                 ):
                     index.append(start + j)
-        return index
+                    est = int(float(dur_val) * self.sample_rate)
+                    lengths.append((est // self.hop_length) * self.hop_length)
+        self._index = index
+        self._lengths = lengths
 
     def __len__(self) -> int:
         return len(self._index)
@@ -404,6 +412,11 @@ class HuggingFaceHiFiTTSDataset(Dataset):
     def hf_index(self) -> List[int]:
         """Underlying HF row ids backing each positional index (for debugging)."""
         return list(self._index)
+
+    @property
+    def audio_lengths(self) -> List[int]:
+        """Estimated resampled audio length per item (samples, for bucketing)."""
+        return list(self._lengths)
 
     def __repr__(self) -> str:
         return (

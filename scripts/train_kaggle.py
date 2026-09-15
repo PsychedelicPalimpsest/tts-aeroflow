@@ -58,6 +58,7 @@ from aeroflow import (
     create_synthetic_batch,
     default_hf_cache_dir,
 )
+from aeroflow.dataset.bucket import BucketBatchSampler, dataset_lengths
 from torch.utils.data import IterableDataset
 
 
@@ -80,6 +81,13 @@ class SyntheticHiFiTTSDataset(Dataset):
 
     def __len__(self) -> int:
         return self.num_samples
+
+    @property
+    def audio_lengths(self) -> list:
+        """Deterministic per-item lengths (samples) for bucketed batching."""
+        return [int((1.0 + (i % 3) * 0.5) * self.sample_rate)
+                // self.hop_length * self.hop_length
+                for i in range(self.num_samples)]
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         text = self.sentences[idx % len(self.sentences)]
@@ -289,6 +297,9 @@ def train():
                              "cache does not fit the ~20 GB /kaggle/working).")
     parser.add_argument("--hf-shuffle-buffer", type=int, default=0,
                         help="Streaming-only: HF shuffle buffer size (0 = in-order stream).")
+    parser.add_argument("--bucket-batches", action=argparse.BooleanOptionalAction, default=True,
+                        help="Group similar-length clips per batch (map datasets only; "
+                             "kills padding waste and stabilizes step times).")
     parser.add_argument("--checkpoint-dir", type=str, default="/kaggle/working/checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--resume-path", type=str, default=None, help="Explicit checkpoint path to resume from")
     parser.add_argument("--auto-resume", action="store_true", default=True, help="Auto-search for existing checkpoints")
@@ -406,22 +417,51 @@ def train():
             hop_length=240
         )
 
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if (is_distributed and not isinstance(dataset, IterableDataset)) else None
+    is_streaming_ds = isinstance(dataset, IterableDataset)
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if (is_distributed and not is_streaming_ds) else None
     use_cuda = device.type == "cuda"
     num_workers = args.num_workers if use_cuda else 0
     prefetch_factor = args.prefetch_factor if num_workers > 0 else None
 
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=(sampler is None and not isinstance(dataset, IterableDataset)),
-        sampler=sampler,
-        num_workers=num_workers,
-        pin_memory=use_cuda,
-        persistent_workers=(num_workers > 0),
-        prefetch_factor=prefetch_factor,
-        collate_fn=collate_hifi_tts
-    )
+    # Length-bucketed batching (map datasets): similar-length clips share a
+    # batch, so padding waste collapses and step times stabilize. Replaces
+    # the sampler (DDP sharding built in). Streaming has no lengths upfront.
+    batch_sampler = None
+    if args.bucket_batches and not is_streaming_ds:
+        lengths = dataset_lengths(dataset)
+        if lengths and len(lengths) == len(dataset):
+            batch_sampler = BucketBatchSampler(
+                lengths, batch_size=args.batch_size, shuffle=True,
+                seed=args.seed, rank=rank, world_size=world_size)
+            sampler = None
+            if is_master:
+                print(f"[DataLoader] Length-bucketed batching ON "
+                      f"({len(batch_sampler)} batches/rank, {len(lengths)} items).")
+        elif is_master:
+            print("[DataLoader] Lengths unavailable; falling back to random batching.")
+
+    if batch_sampler is not None:
+        loader = DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            pin_memory=use_cuda,
+            persistent_workers=(num_workers > 0),
+            prefetch_factor=prefetch_factor,
+            collate_fn=collate_hifi_tts
+        )
+    else:
+        loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            shuffle=(sampler is None and not is_streaming_ds),
+            sampler=sampler,
+            num_workers=num_workers,
+            pin_memory=use_cuda,
+            persistent_workers=(num_workers > 0),
+            prefetch_factor=prefetch_factor,
+            collate_fn=collate_hifi_tts
+        )
 
     # 3. Model Architecture
     model = AeroFlowTTS(
@@ -456,7 +496,6 @@ def train():
 
     # Streaming datasets have no len(): bound each epoch explicitly so the
     # scheduler period, epoch checkpoints, and logging stay well-defined.
-    is_streaming_ds = isinstance(dataset, IterableDataset)
     if is_streaming_ds:
         steps_per_epoch = args.steps_per_epoch or 1000
     else:
@@ -513,6 +552,8 @@ def train():
     for epoch in range(start_epoch, args.epochs):
         if is_distributed and sampler is not None:
             sampler.set_epoch(epoch)
+        if batch_sampler is not None:
+            batch_sampler.set_epoch(epoch)
         if hasattr(dataset, "set_epoch"):
             dataset.set_epoch(epoch)
 
