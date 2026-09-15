@@ -520,9 +520,19 @@ def train():
         epoch_loss = 0.0
         batches_in_epoch = 0
 
-        for batch_idx, batch in enumerate(loader):
-            if is_streaming_ds and batch_idx >= steps_per_epoch:
-                break
+        # Manual iterator: separates data-wait from compute so the step log
+        # shows exactly where a starved GPU is losing time.
+        loader_iter = iter(loader)
+        for batch_idx in range(steps_per_epoch):
+            t_data_start = time.perf_counter()
+            try:
+                batch = next(loader_iter)
+            except StopIteration:
+                if is_streaming_ds:
+                    break  # stream exhausted before the cap; end epoch early
+                loader_iter = iter(loader)
+                batch = next(loader_iter)
+            data_wait_ms = (time.perf_counter() - t_data_start) * 1000.0
             # Watchdog check
             elapsed_time = time.time() - start_wall_time
             if elapsed_time >= max_watchdog_seconds:
@@ -604,7 +614,8 @@ def train():
                     f"IF: {metrics['loss_if'].item():.3f}) | "
                     f"Grad: {grad_norm.item():.2f} | "
                     f"LR: {lr_curr:.2e} | "
-                    f"Time: {step_duration_ms:.1f}ms"
+                    f"Time: {step_duration_ms:.1f}ms "
+                    f"(data {data_wait_ms:.0f}ms / compute {step_duration_ms - data_wait_ms:.0f}ms)"
                 )
 
             # Atomic checkpoint saving
