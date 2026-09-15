@@ -301,6 +301,8 @@ def _wide_light_kwargs(**over):
 def test_integration_light_map_9017():
     pytest.importorskip("datasets", reason="datasets lib not installed",
                         exc_type=ImportError)
+    pytest.importorskip("torchcodec", reason="datasets audio backend not installed",
+                        exc_type=ImportError)
     try:
         ds = HuggingFaceHiFiTTSDataset(**_wide_light_kwargs(speaker_ids=("9017",)))
     except Exception as exc:
@@ -357,6 +359,8 @@ def test_dry_run_loader_light_integration():
 
 def test_integration_light_streaming_matches_map():
     pytest.importorskip("datasets", reason="datasets lib not installed",
+                        exc_type=ImportError)
+    pytest.importorskip("torchcodec", reason="datasets audio backend not installed",
                         exc_type=ImportError)
     try:
         stream = StreamingHiFiTTSDataset(**_wide_light_kwargs(speaker_ids=("9017",)))

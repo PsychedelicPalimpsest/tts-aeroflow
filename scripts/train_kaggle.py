@@ -39,6 +39,7 @@ import time
 from typing import Dict, Optional, Tuple, Any
 
 import numpy as np
+import soundfile as sf
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -268,6 +269,54 @@ def resume_from_checkpoint(
     return global_step, epoch, best_loss
 
 
+#: Fixed prompts synthesized for listening checks during training.
+DEFAULT_SAMPLE_PROMPTS = [
+    "Peter Piper picked a peck of pickled peppers.",
+    "The quick brown fox jumps over the lazy dog.",
+]
+
+
+def save_training_samples(
+    raw_model: torch.nn.Module,
+    prompts: list,
+    sample_dir: Path,
+    global_step: int,
+    sample_rate: int = 24000,
+    alpha: float = 1.0,
+) -> list:
+    """
+    Synthesizes fixed prompts with the current weights and writes one WAV
+    per prompt (``step_{global_step:06d}_{i}.wav``) for listening checks.
+    Master-only; never raises (a failed sample must not kill training).
+    Returns the list of written paths (empty on failure).
+    """
+    sample_dir = Path(sample_dir)
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    prompts_file = sample_dir / "prompts.txt"
+    if not prompts_file.exists():
+        prompts_file.write_text("\n".join(f"{i}: {p}" for i, p in enumerate(prompts)) + "\n",
+                                encoding="utf-8")
+    was_training = raw_model.training
+    raw_model.eval()
+    paths = []
+    try:
+        with torch.no_grad():
+            for i, prompt in enumerate(prompts):
+                wav = raw_model.synthesize(prompt, alpha=alpha).clamp(-1.0, 1.0)
+                if not torch.isfinite(wav).all() or wav.numel() == 0:
+                    continue
+                path = sample_dir / f"step_{global_step:06d}_{i}.wav"
+                sf.write(str(path), wav.detach().cpu().numpy(), sample_rate)
+                paths.append(path)
+    except Exception as exc:
+        print(f"  [Samples] synthesis failed at step {global_step}: {exc}")
+        paths = []
+    finally:
+        if was_training:
+            raw_model.train()
+    return paths
+
+
 def train():
     parser = argparse.ArgumentParser(description="AeroFlow-v2 Kaggle 2x T4 DDP Training")
     parser.add_argument("--manifest-path", type=str, default=None, help="Path to Hi-Fi TTS JSON manifest")
@@ -315,6 +364,10 @@ def train():
                              "Also sets the cosine scheduler period.")
     parser.add_argument("--lr", type=float, default=2e-4, help="AdamW learning rate")
     parser.add_argument("--save-interval-steps", type=int, default=500, help="Save latest checkpoint every N steps")
+    parser.add_argument("--sample-interval-steps", type=int, default=1000,
+                        help="Synthesize listening samples every N steps (0 disables).")
+    parser.add_argument("--sample-prompts", type=str, default=None,
+                        help="'|' separated sample prompts (default: classic test sentences).")
     parser.add_argument("--max-hours", type=float, default=11.2, help="Watchdog timeout in hours (default 11.2h)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--synthetic-samples", type=int, default=200, help="Samples for synthetic fallback dataset")
@@ -548,6 +601,9 @@ def train():
 
     latest_ckpt_path = checkpoint_dir / "checkpoint_latest.pt"
     best_ckpt_path = checkpoint_dir / "checkpoint_best.pt"
+    sample_dir = checkpoint_dir / "samples"
+    sample_prompts = ([p.strip() for p in args.sample_prompts.split("|") if p.strip()]
+                      if args.sample_prompts else list(DEFAULT_SAMPLE_PROMPTS))
 
     for epoch in range(start_epoch, args.epochs):
         if is_distributed and sampler is not None:
@@ -674,6 +730,14 @@ def train():
                         global_step, epoch, best_loss, is_distributed
                     )
                     print(f"  --> [Checkpoint] New best loss {best_loss:.4f}! Saved to {best_ckpt_path}")
+
+            # Periodic listening samples (master only, never fatal)
+            if is_master and args.sample_interval_steps > 0 and global_step % args.sample_interval_steps == 0:
+                raw_model = model.module if is_distributed else model
+                paths = save_training_samples(
+                    raw_model, sample_prompts, sample_dir, global_step)
+                if paths:
+                    print(f"  --> [Samples] Wrote {len(paths)} sample(s) to {sample_dir} (step {global_step})")
 
         # End of epoch checkpoint
         if is_master:
