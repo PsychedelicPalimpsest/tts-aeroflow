@@ -287,11 +287,17 @@ def train():
                         help="HF datasets cache dir. Default auto-resolves to "
                              "/kaggle/tmp/hf_cache on Kaggle (the ~40 GB corpus "
                              "cache does not fit the ~20 GB /kaggle/working).")
+    parser.add_argument("--hf-shuffle-buffer", type=int, default=0,
+                        help="Streaming-only: HF shuffle buffer size (0 = in-order stream).")
     parser.add_argument("--checkpoint-dir", type=str, default="/kaggle/working/checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--resume-path", type=str, default=None, help="Explicit checkpoint path to resume from")
     parser.add_argument("--auto-resume", action="store_true", default=True, help="Auto-search for existing checkpoints")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size per GPU")
     parser.add_argument("--epochs", type=int, default=100, help="Total number of training epochs")
+    parser.add_argument("--steps-per-epoch", type=int, default=None,
+                        help="Batches per epoch. Default: len(loader) for map datasets; "
+                             "1000 for streaming datasets (which have no len()). "
+                             "Also sets the cosine scheduler period.")
     parser.add_argument("--lr", type=float, default=2e-4, help="AdamW learning rate")
     parser.add_argument("--save-interval-steps", type=int, default=500, help="Save latest checkpoint every N steps")
     parser.add_argument("--max-hours", type=float, default=11.2, help="Watchdog timeout in hours (default 11.2h)")
@@ -307,6 +313,7 @@ def train():
         print("=" * 80)
         print("AEROFLOW-v2: KAGGLE 2x T4 DISTRIBUTED DATA PARALLEL TRAINING SYSTEM")
         print(f"Distributed DDP: {is_distributed} | World Size: {world_size} | Device: {device}")
+        print(f"PyTorch: {torch.__version__} | CUDA available: {torch.cuda.is_available()}")
         print(f"OMP Threads: {os.environ.get('OMP_NUM_THREADS')} | NCCL P2P Disabled: {os.environ.get('NCCL_P2P_DISABLE')}")
         print("=" * 80)
 
@@ -366,6 +373,7 @@ def train():
                       f"streaming=True, no local copy, O(1) RAM.")
             dataset = StreamingHiFiTTSDataset(
                 **hf_common, rank=rank, world_size=world_size,
+                seed=args.seed, shuffle_buffer_size=args.hf_shuffle_buffer,
             )
             is_streaming = True
         if is_master:
@@ -441,9 +449,20 @@ def train():
         weight_decay=0.01
     )
 
+    # Streaming datasets have no len(): bound each epoch explicitly so the
+    # scheduler period, epoch checkpoints, and logging stay well-defined.
+    is_streaming_ds = isinstance(dataset, IterableDataset)
+    if is_streaming_ds:
+        steps_per_epoch = args.steps_per_epoch or 1000
+    else:
+        steps_per_epoch = args.steps_per_epoch or max(1, len(loader))
+    if is_master:
+        print(f"[Training] Steps per epoch: {steps_per_epoch} "
+              f"({'streaming estimate' if is_streaming_ds and not args.steps_per_epoch else 'measured' if not is_streaming_ds and not args.steps_per_epoch else 'user-specified'})")
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=args.epochs * max(1, len(loader)),
+        T_max=args.epochs * steps_per_epoch,
         eta_min=1e-5
     )
 
@@ -487,12 +506,16 @@ def train():
     for epoch in range(start_epoch, args.epochs):
         if is_distributed and sampler is not None:
             sampler.set_epoch(epoch)
+        if hasattr(dataset, "set_epoch"):
+            dataset.set_epoch(epoch)
 
         model.train()
         epoch_loss = 0.0
         batches_in_epoch = 0
 
         for batch_idx, batch in enumerate(loader):
+            if is_streaming_ds and batch_idx >= steps_per_epoch:
+                break
             # Watchdog check
             elapsed_time = time.time() - start_wall_time
             if elapsed_time >= max_watchdog_seconds:

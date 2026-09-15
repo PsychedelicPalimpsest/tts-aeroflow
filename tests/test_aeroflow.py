@@ -268,3 +268,25 @@ def test_stft_frame_count_exactness():
     S, _, _ = model.stft_analysis(audio)
     assert S.shape[-1] == expected_frames == 101
 
+
+def test_spectral_loss_masked_silence_grad_finite():
+    """Realistic worst case: speech + trailing padded silence under audio_mask.
+
+    Masked-out (exact-zero) regions must not poison gradients via 0 * NaN on
+    any backend/BLAS.
+    """
+    torch.manual_seed(0)
+    loss_fn = AeroFlowLoss()
+    speech = torch.randn(2, 12000) * 0.5
+    y = torch.zeros(2, 24000)
+    y[:, :12000] = speech
+    y_hat = y.clone().detach().requires_grad_(True)
+    audio_mask = torch.zeros(2, 24000, dtype=torch.bool)
+    audio_mask[:, :12000] = True
+
+    l_mr = loss_fn.mr_stft_loss(y, y_hat, audio_mask=audio_mask)
+    l_if = loss_fn.if_loss(y, y_hat, audio_mask=audio_mask)
+    assert torch.isfinite(l_mr) and torch.isfinite(l_if)
+    (l_mr + l_if).backward()
+    assert torch.isfinite(y_hat.grad).all()
+

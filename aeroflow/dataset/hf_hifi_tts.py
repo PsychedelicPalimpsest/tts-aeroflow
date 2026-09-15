@@ -428,6 +428,9 @@ class StreamingHiFiTTSDataset(IterableDataset):
     Supports ``torch.utils.data.DataLoader(num_workers=N)`` sharding via
     ``itertools.islice`` and multi-node DDP via ``rank``/``world_size``
     (uses HF ``IterableDataset.shard`` when available).
+
+    Call :meth:`set_epoch` once per epoch (like a sampler) so the optional
+    shuffle buffer reshuffles between passes over the stream.
     """
 
     def __init__(
@@ -443,6 +446,8 @@ class StreamingHiFiTTSDataset(IterableDataset):
         text_field: str = "text_normalized",
         rank: int = 0,
         world_size: int = 1,
+        seed: int = 42,
+        shuffle_buffer_size: int = 0,
         cache_dir: Optional[str] = None,
         token: Optional[Union[str, bool]] = None,
     ):
@@ -458,9 +463,16 @@ class StreamingHiFiTTSDataset(IterableDataset):
         self.text_field = text_field
         self.rank = rank
         self.world_size = max(1, world_size)
+        self.seed = seed
+        self.shuffle_buffer_size = shuffle_buffer_size
         self.cache_dir = _resolve_cache_dir(cache_dir)
         self.token = token
         self.phonemizer = Phonemizer()
+        self._epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        """Sets the epoch index (reshuffles the stream when shuffling is on)."""
+        self._epoch = int(epoch)
 
     def _open_stream(self) -> Iterable[Dict[str, Any]]:
         from datasets import load_dataset  # lazy import
@@ -476,6 +488,14 @@ class StreamingHiFiTTSDataset(IterableDataset):
         if self.world_size > 1 and hasattr(ds, "shard"):
             try:
                 ds = ds.shard(num_shards=self.world_size, index=self.rank)
+            except Exception:
+                pass
+        if self.shuffle_buffer_size and self.shuffle_buffer_size > 0 and hasattr(ds, "shuffle"):
+            try:
+                ds = ds.shuffle(
+                    buffer_size=self.shuffle_buffer_size,
+                    seed=self.seed + self._epoch,
+                )
             except Exception:
                 pass
         return ds

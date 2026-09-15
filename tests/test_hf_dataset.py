@@ -250,6 +250,24 @@ def test_metadata_index_never_touches_audio():
     assert batch["audio"].dim() == 2
 
 
+def test_streaming_defaults_and_epoch(monkeypatch):
+    """Streaming adapter constructs offline; epoch only affects shuffle seed."""
+    monkeypatch.setenv("KAGGLE_TMP_DIR", "/nonexistent-kaggle-tmp-xyz")
+    s = StreamingHiFiTTSDataset(repo_id=HF_REPO_LIGHT)
+    assert s.seed == 42
+    assert s.shuffle_buffer_size == 0
+    assert s.cache_dir is None  # no Kaggle scratch in this env
+    s.set_epoch(3)
+    assert s._epoch == 3
+
+
+def test_streaming_explicit_cache_dir(tmp_path):
+    s = StreamingHiFiTTSDataset(repo_id=HF_REPO_LIGHT,
+                                cache_dir=str(tmp_path / "c"))
+    assert s.cache_dir == str(tmp_path / "c")
+    assert (tmp_path / "c").is_dir()
+
+
 def test_factory_routing():
     from aeroflow.dataset.dataset import HiFiTTSDataset
     local = create_hifi_tts_dataset("manifest")

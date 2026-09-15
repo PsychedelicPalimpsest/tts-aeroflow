@@ -16,6 +16,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _safe_complex_abs(z: torch.Tensor, floor: float = 1e-7) -> torch.Tensor:
+    """
+    Gradient-safe magnitude of a complex spectrogram.
+
+    ``torch.abs`` on complex input has an undefined (backend-dependent:
+    0 or NaN) gradient at exactly-zero bins, which silent or subnormal
+    inputs hit. ``sqrt(re^2 + im^2 + floor^2)`` is bit-identical to
+    ``|z|`` at normal audio scales while its gradient (``z / safe_abs``)
+    is well-defined zero at ``z == 0`` on every backend.
+    """
+    return torch.sqrt(z.real * z.real + z.imag * z.imag + floor * floor)
+
+
 class CFMLoss(nn.Module):
     """Optimal Transport Conditional Flow Matching loss (mean squared velocity error)."""
 
@@ -144,8 +157,8 @@ class SingleResolutionSTFTLoss(nn.Module):
             window=self.window, center=True, normalized=False, onesided=True, return_complex=True
         )
 
-        mag = torch.abs(S)
-        mag_hat = torch.abs(S_hat)
+        mag = _safe_complex_abs(S)
+        mag_hat = _safe_complex_abs(S_hat)
         T_frames = mag.shape[-1]
 
         frame_mask = None
@@ -263,9 +276,11 @@ class InstantaneousFrequencyLoss(nn.Module):
         diff_t = S[:, :, 1:] * torch.conj(S[:, :, :-1])
         diff_t_hat = S_hat[:, :, 1:] * torch.conj(S_hat[:, :, :-1])
 
-        # Normalized phasors (eliminating torch.angle and atan2 gradient blowups)
-        p_gt = diff_t / (torch.abs(diff_t) + 1e-5)
-        p_pred = diff_t_hat / (torch.abs(diff_t_hat) + 1e-5)
+        # Normalized phasors (eliminating torch.angle and atan2 gradient blowups).
+        # The safe magnitude additionally guarantees finite gradients at
+        # zero-energy bins (silence / subnormal inputs) on every backend.
+        p_gt = diff_t / (_safe_complex_abs(diff_t) + 1e-5)
+        p_pred = diff_t_hat / (_safe_complex_abs(diff_t_hat) + 1e-5)
 
         # Unit phasor cosine distance: 1.0 - Re(p_gt * conj(p_pred))
         # Re(A * conj(B)) = A.real * B.real + A.imag * B.imag
@@ -283,7 +298,9 @@ class InstantaneousFrequencyLoss(nn.Module):
             frame_mask = (f_idx < valid_diff.unsqueeze(1)).unsqueeze(1).to(phase_dist.dtype)
 
         # Weight by magnitude to focus on voiced speech harmonics
-        mag_weight = torch.sqrt(torch.abs(S[:, :, 1:]) * torch.abs(S_hat[:, :, 1:]) + 1e-5)
+        mag_weight = torch.sqrt(
+            _safe_complex_abs(S[:, :, 1:]) * _safe_complex_abs(S_hat[:, :, 1:]) + 1e-5
+        )
         if frame_mask is not None:
             mag_weight = mag_weight * frame_mask
         mag_norm = mag_weight / (mag_weight.mean(dim=(-2, -1), keepdim=True) + 1e-5)

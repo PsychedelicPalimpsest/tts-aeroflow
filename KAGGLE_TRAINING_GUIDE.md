@@ -64,13 +64,17 @@ torchrun --nproc_per_node=2 scripts/train_kaggle.py \
     --dataset-source hf-streaming \
     --hf-repo-id MikhailT/hifi-tts \
     --hf-subset clean --hf-split train --hf-speaker 9017 \
+    --steps-per-epoch 1000 \
     --checkpoint-dir "/kaggle/working/checkpoints" \
     --batch-size 16 --epochs 100 --max-hours 11.2 --auto-resume
 ```
 Requires `pip install -q "datasets[audio]"` (see Cell 2). Subsets: `clean` /
 `other` with splits `train`/`test`/`dev`, or subset `all` with splits
 `train.clean`, `train.other`, `test.clean`, `test.other`, `dev.clean`,
-`dev.other`. `--hf-speaker all` keeps every speaker.
+`dev.other`. `--hf-speaker all` keeps every speaker. Streaming datasets have no length,
+so each epoch is capped at `--steps-per-epoch` (default 1000, also the cosine
+scheduler period); `--hf-shuffle-buffer N` enables a reshuffled stream buffer
+(0 = in-order).
 
 > [!IMPORTANT]
 > **Storage layout:** `/kaggle/working` is only ~20 GB but the full corpus
