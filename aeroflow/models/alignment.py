@@ -26,9 +26,15 @@ def maximum_path_viterbi(
         path: [B, N, T] binary alignment matrix with exactly one 1 per column (audio frame).
 
     The DP is vectorized over phonemes N and batch B (one [B, N] sweep per
-    frame t) with the monotonic band constraint applied as a mask. This is
-    bit-identical to the scalar triple-loop formulation but ~100x faster,
-    since per-cell kernel launches dominated both CPU and CUDA step time.
+    frame t) with the monotonic band constraint precomputed once as a mask.
+    Backtracking walks all batch rows together with plain gather/scatter
+    (no per-frame fancy indexing) and builds the path via broadcasting.
+    Bit-identical to the scalar triple-loop formulation, at a fraction of
+    the kernel launches that dominated both CPU and CUDA step time.
+
+    The body is intentionally TorchScript-compatible (no data-dependent
+    Python control flow): :func:`scripted_maximum_path` compiles it for the
+    training path. Use that on the training path.
     """
     B, N, T = neg_cent.shape
     device = neg_cent.device
@@ -41,53 +47,79 @@ def maximum_path_viterbi(
 
     Q = torch.full((B, N, T), NEG, dtype=torch.float32, device=device)
     backtrack = torch.zeros((B, N, T), dtype=torch.int64, device=device)
-    path = torch.zeros((B, N, T), dtype=torch.float32, device=device)
 
     b_idx = torch.arange(B, device=device)
-    n_grid = torch.arange(N, device=device).view(1, N)
+    n_grid = torch.arange(N, device=device).view(1, N, 1)
     neg_col = torch.full((B, 1), NEG, dtype=torch.float32, device=device)
 
     # Base condition: start at (0, 0)
     valid0 = (n_eff > 0) & (t_len > 0)
-    if valid0.any():
-        vb = b_idx[valid0]
-        Q[vb, 0, 0] = neg_cent[vb, 0, 0].float()
+    Q[:, 0, 0] = torch.where(valid0, neg_cent[:, 0, 0].float(), Q[:, 0, 0])
+
+    # Monotonic band for every frame, computed once (no per-frame mask math):
+    # n in [max(0, n_eff - (t_len - t)), min(t + 1, n_eff)]
+    tt = torch.arange(T, device=device).view(1, 1, T)
+    n_eff_3 = n_eff.view(B, 1, 1)
+    t_len_3 = t_len.view(B, 1, 1)
+    n_min_all = torch.clamp(n_eff_3 - (t_len_3 - tt), min=0)
+    n_max_all = torch.minimum(tt + 1, n_eff_3)
+    band = (n_grid >= n_min_all) & (n_grid < n_max_all)
 
     scores_t = neg_cent.float()
     for t in range(1, T):
-        active_t = t < t_len  # [B]
-        if not bool(active_t.any()):
-            break
-        # Monotonic band: n in [max(0, n_eff - (t_len - t)), min(t + 1, n_eff)]
-        n_min = torch.clamp(n_eff - (t_len - t), min=0).unsqueeze(1)  # [B, 1]
-        n_max = torch.minimum(torch.full_like(n_eff, t + 1), n_eff).unsqueeze(1)
-        in_band = (n_grid >= n_min) & (n_grid < n_max) & active_t.unsqueeze(1)
-
         prev = Q[:, :, t - 1]  # [B, N]
         stay = prev
         step = torch.cat([neg_col, prev[:, :-1]], dim=1)
         take_step = step > stay  # ties keep stay (matches scalar `stay >= step`)
         upd = torch.maximum(stay, step) + scores_t[:, :, t]
 
+        in_band = band[:, :, t]
         Q[:, :, t] = torch.where(in_band, upd, Q[:, :, t])
         backtrack[:, :, t] = torch.where(in_band, take_step.to(torch.int64), backtrack[:, :, t])
 
-    # Backtrack from (n_eff - 1, t_len - 1), vectorized over the batch
-    curr = (n_eff - 1).clamp(min=0)  # [B]
+    # Backward walk from (n_eff - 1, t_len - 1) for all rows at once.
+    # Padded frames carry bt == 0 so curr freezes there; invalid rows/frames
+    # are zeroed once at the end instead of masked per frame.
     has_content = (n_eff > 0) & (t_len > 0)
-    for t in range(T - 1, -1, -1):
-        active = has_content & (t < t_len)
-        if not bool(active.any()):
-            continue
-        ab = b_idx[active]
-        cn = curr[active]
-        path[ab, cn, t] = 1.0
-        if t > 0:
-            stepped = backtrack[ab, cn, t] == 1
-            dec_idx = ab[stepped]
-            curr[dec_idx] = (curr[dec_idx] - 1).clamp(min=0)
+    curr = (n_eff - 1).clamp(min=0)  # [B]
+    cols = torch.zeros((B, T), dtype=torch.int64, device=device)
+    for t in range(T - 1, 0, -1):
+        cols[:, t] = curr
+        stepped = backtrack[b_idx, curr, t]
+        curr = curr - stepped
+    cols[:, 0] = curr
+
+    frame_ok = (tt.view(1, T) < t_len.view(B, 1)) & has_content.view(B, 1)
+    path = (cols.view(B, 1, T) == n_grid).to(torch.float32)
+    path = path * frame_ok.view(B, 1, T).to(torch.float32)
 
     return path
+
+
+_scripted_mas = None
+
+
+def scripted_maximum_path(
+    neg_cent: torch.Tensor,
+    text_lengths: torch.Tensor,
+    audio_lengths: torch.Tensor
+) -> torch.Tensor:
+    """
+    TorchScript-compiled :func:`maximum_path_viterbi` for the training path.
+
+    Compiles lazily on first call (then cached); falls back to the eager
+    vectorized implementation if scripting is unavailable. Bit-identical
+    output (covered by the brute-force regression test, which runs both).
+    """
+    global _scripted_mas
+    if _scripted_mas is None:
+        try:
+            _scripted_mas = torch.jit.script(maximum_path_viterbi)
+        except Exception:
+            _scripted_mas = False
+    if _scripted_mas is False:
+        return maximum_path_viterbi(neg_cent, text_lengths, audio_lengths)
+    return _scripted_mas(neg_cent, text_lengths, audio_lengths)
 
 
 def alignment_to_durations(
@@ -209,28 +241,19 @@ def expand_text_representations(
         C = torch.repeat_interleave(h_valid, d_valid, dim=0).unsqueeze(0)  # [1, T, D]
         return C.transpose(1, 2)  # [1, D, T]
 
-    # Batched path: expand each batch item and pad to max_T
+    # Batched path: fully vectorized. Frame f belongs to the smallest
+    # phoneme n with cumsum(durations)[n] > f, i.e. seg[b, f] counts how
+    # many cumulative ends fall at or before f (zero-duration phonemes can
+    # never be selected since their repeated end value keeps them out).
+    # A handful of launches total instead of ~5 per batch item.
     total_frames = durations.sum(dim=1)  # [B]
     max_T = int(total_frames.max().item())
+    if max_T <= 0:
+        return torch.zeros((B, D, 1), device=device, dtype=H_text.dtype)
 
-    expanded_list = []
-    for b in range(B):
-        d_b = durations[b]
-        # Only take valid tokens with d > 0
-        valid_idx = d_b > 0
-        h_valid = H_text[b, valid_idx]
-        d_valid = d_b[valid_idx]
-
-        if len(d_valid) == 0:
-            c_b = torch.zeros((max_T, D), device=device)
-        else:
-            c_b = torch.repeat_interleave(h_valid, d_valid, dim=0)  # [T_b, D]
-            if c_b.shape[0] < max_T:
-                pad_t = max_T - c_b.shape[0]
-                c_b = F.pad(c_b, (0, 0, 0, pad_t))
-            elif c_b.shape[0] > max_T:
-                c_b = c_b[:max_T]
-        expanded_list.append(c_b)
-
-    C = torch.stack(expanded_list, dim=0)  # [B, max_T, D]
+    ends = durations.cumsum(dim=1)  # [B, N]
+    pos = torch.arange(max_T, device=device).view(1, 1, -1)  # [1, 1, T]
+    seg = (ends.unsqueeze(2) <= pos).sum(dim=1).clamp(max=N - 1)  # [B, T]
+    valid = (pos.squeeze(1) < total_frames.unsqueeze(1)).to(H_text.dtype)  # [B, T]
+    C = H_text.gather(1, seg.unsqueeze(-1).expand(B, max_T, D)) * valid.unsqueeze(-1)
     return C.transpose(1, 2)  # [B, D, max_T]

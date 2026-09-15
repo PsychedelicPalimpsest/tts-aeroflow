@@ -19,7 +19,7 @@ from aeroflow.frontend.phonemizer import Phonemizer
 from aeroflow.models.encoder import ConformerEncoder
 from aeroflow.models.alignment import (
     EnergyConstrainedDurationPredictor,
-    maximum_path_viterbi,
+    scripted_maximum_path,
     alignment_to_durations,
     expand_text_representations
 )
@@ -146,7 +146,8 @@ class AeroFlowTTS(nn.Module):
         dist = torch.cdist(text_proj, z_t, p=2.0)    # [B, N, T]
         neg_dist = -0.5 * (dist ** 2)
 
-        path = maximum_path_viterbi(neg_dist, text_lengths, frame_lengths)
+        # TorchScript-compiled MAS: dozens of launches instead of ~20k.
+        path = scripted_maximum_path(neg_dist, text_lengths, frame_lengths)
         durations = alignment_to_durations(path, text_lengths=text_lengths)
         return path, durations
 

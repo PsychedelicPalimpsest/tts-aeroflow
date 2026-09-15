@@ -13,6 +13,7 @@ from aeroflow.frontend.phonemizer import Phonemizer, ALL_TOKENS
 from aeroflow.models.encoder import ConformerEncoder
 from aeroflow.models.alignment import (
     maximum_path_viterbi,
+    scripted_maximum_path,
     alignment_to_durations,
     EnergyConstrainedDurationPredictor,
     expand_text_representations
@@ -344,11 +345,30 @@ def test_mas_matches_brute_force():
         scores = ((torch.randn(B, N, T) * 4).round() / 4)  # force ties
         tl = torch.randint(1, N + 1, (B,))
         al = torch.randint(1, T + 1, (B,))
-        got = maximum_path_viterbi(scores, tl, al)
-        for b in range(B):
-            nl = min(int(tl[b]), int(al[b]))
-            ref = _brute_force_mas(scores[b].tolist(), int(tl[b]), int(al[b]))
-            exp = torch.zeros(N, T)
-            exp[:nl, : int(al[b])] = torch.tensor(ref)
-            assert torch.equal(got[b], exp), f"mismatch B={B} N={N} T={T} b={b}"
+        for fn in (maximum_path_viterbi, scripted_maximum_path):
+            got = fn(scores, tl, al)
+            for b in range(B):
+                nl = min(int(tl[b]), int(al[b]))
+                ref = _brute_force_mas(scores[b].tolist(), int(tl[b]), int(al[b]))
+                exp = torch.zeros(N, T)
+                exp[:nl, : int(al[b])] = torch.tensor(ref)
+                assert torch.equal(got[b], exp), f"mismatch {fn.__name__} B={B} N={N} T={T} b={b}"
+
+
+def test_expand_matches_per_item_oracle():
+    """Vectorized batched expand must equal stacked per-item fast paths."""
+    from aeroflow.models.alignment import expand_text_representations
+    torch.manual_seed(11)
+    B, N, D = 5, 12, 16
+    H = torch.randn(B, N, D)
+    d = torch.randint(0, 6, (B, N))  # includes zero durations + empty rows
+    d[0] = 0
+    got = expand_text_representations(H, d)
+    assert got.shape[0] == B and got.shape[1] == D
+    max_T = got.shape[2]
+    for b in range(B):
+        ref = expand_text_representations(H[b : b + 1], d[b : b + 1])
+        Tb = ref.shape[2]
+        assert torch.equal(got[b, :, :Tb], ref[0])
+        assert (got[b, :, Tb:] == 0).all()
 
