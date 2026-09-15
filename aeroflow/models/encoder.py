@@ -87,7 +87,9 @@ class MultiHeadSelfAttentionRoPE(nn.Module):
         if mask is not None:
             # mask: [B, N] -> [B, 1, 1, N]
             attn_mask = mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, N]
-            scores = scores.masked_fill(attn_mask == 0, -1e9)
+            # Dtype-aware large negative: -1e9 overflows FP16 (max 65504)
+            # under AMP autocast, aborting masked_fill on CUDA.
+            scores = scores.masked_fill(attn_mask == 0, torch.finfo(scores.dtype).min)
 
         attn = F.softmax(scores, dim=-1)
         attn = self.dropout(attn)

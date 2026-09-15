@@ -290,3 +290,20 @@ def test_spectral_loss_masked_silence_grad_finite():
     (l_mr + l_if).backward()
     assert torch.isfinite(y_hat.grad).all()
 
+
+def test_attention_mask_fp16_no_overflow():
+    """Kaggle regression: -1e9 mask overflows FP16 (max 65504) under AMP.
+
+    The mask fill must use a dtype-aware minimum so masked_fill works in
+    half precision and masked positions still softmax to zero.
+    """
+    from aeroflow.models.encoder import MultiHeadSelfAttentionRoPE
+    torch.manual_seed(0)
+    attn = MultiHeadSelfAttentionRoPE(d_model=192, num_heads=4).half()
+    x = torch.randn(2, 10, 192, dtype=torch.float16)
+    mask = torch.ones(2, 10)
+    mask[:, 8:] = 0
+    out = attn(x, mask=mask)
+    assert out.dtype == torch.float16
+    assert torch.isfinite(out.float()).all()
+
