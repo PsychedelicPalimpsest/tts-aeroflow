@@ -294,6 +294,10 @@ def train():
     parser.add_argument("--auto-resume", action="store_true", default=True, help="Auto-search for existing checkpoints")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size per GPU")
     parser.add_argument("--epochs", type=int, default=100, help="Total number of training epochs")
+    parser.add_argument("--num-workers", type=int, default=2,
+                        help="DataLoader workers per GPU process (default 2: matches 4-vCPU Kaggle hosts)")
+    parser.add_argument("--prefetch-factor", type=int, default=2,
+                        help="Batches prefetched per worker (raise to 3-4 to hide slow storage)")
     parser.add_argument("--steps-per-epoch", type=int, default=None,
                         help="Batches per epoch. Default: len(loader) for map datasets; "
                              "1000 for streaming datasets (which have no len()). "
@@ -404,7 +408,8 @@ def train():
 
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if (is_distributed and not isinstance(dataset, IterableDataset)) else None
     use_cuda = device.type == "cuda"
-    num_workers = 2 if use_cuda else 0
+    num_workers = args.num_workers if use_cuda else 0
+    prefetch_factor = args.prefetch_factor if num_workers > 0 else None
 
     loader = DataLoader(
         dataset,
@@ -414,7 +419,7 @@ def train():
         num_workers=num_workers,
         pin_memory=use_cuda,
         persistent_workers=(num_workers > 0),
-        prefetch_factor=2 if num_workers > 0 else None,
+        prefetch_factor=prefetch_factor,
         collate_fn=collate_hifi_tts
     )
 
@@ -459,6 +464,8 @@ def train():
     if is_master:
         print(f"[Training] Steps per epoch: {steps_per_epoch} "
               f"({'streaming estimate' if is_streaming_ds and not args.steps_per_epoch else 'measured' if not is_streaming_ds and not args.steps_per_epoch else 'user-specified'})")
+        print(f"[DataLoader] batch-size/GPU: {args.batch_size} | workers/GPU: {num_workers} | "
+              f"prefetch/worker: {prefetch_factor} | pin_memory: {use_cuda}")
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,

@@ -76,6 +76,23 @@ so each epoch is capped at `--steps-per-epoch` (default 1000, also the cosine
 scheduler period); `--hf-shuffle-buffer N` enables a reshuffled stream buffer
 (0 = in-order).
 
+### Option B2: Maximizing GPU utilization (fix for starved GPUs)
+If `nvidia-smi`/Kaggle metrics show low GPU% with CPU pinned, the data
+pipeline is the bottleneck:
+1. **Prefer `--dataset-source hf` over `hf-streaming`.** Streaming pulls every
+   parquet row-group over HTTP (each worker re-traverses the data, and
+   unauthenticated Hub requests are rate-limited). The one-time ~40 GB
+   download to `/kaggle/tmp/hf_cache` pays for itself immediately; after that
+   workers feed from local disk.
+2. **Raise `--batch-size`.** 6 GB / 15 GB VRAM means headroom: try 24–32 per
+   GPU and watch GPU memory.
+3. **Set an `HF_TOKEN`.** Kaggle Secrets → environment variable `HF_TOKEN`
+   lifts Hub rate limits (faster one-time download and streaming alike). The
+   `datasets` library picks it up automatically, no flag needed.
+4. **Tune `--num-workers` / `--prefetch-factor`.** Defaults (2 workers/GPU,
+   prefetch 2) match the 4-vCPU host; with slow storage try
+   `--prefetch-factor 4` to deepen the queue.
+
 > [!IMPORTANT]
 > **Storage layout:** `/kaggle/working` is only ~20 GB but the full corpus
 > cache is ~40 GB. `train_kaggle.py` therefore creates `/kaggle/tmp` scratch
