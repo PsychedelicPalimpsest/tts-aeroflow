@@ -1,0 +1,75 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Unit test / coverage / pytest
+.pytest_cache/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.tox/
+
+# Checkpoints, models, and large binaries
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+*.tmp
+
+# Temporary training, test, and logging directories
+temp_*
+temp_kaggle_ckpt/
+logs/
+wandb/
+
+# Audio files (ignore audio data/outputs except dry-run test artifact)
+*.wav
+*.mp3
+*.flac
+*.ogg
+!scripts/dry_run_output.wav
+
+# OS and Editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
