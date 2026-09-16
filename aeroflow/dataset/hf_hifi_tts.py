@@ -177,6 +177,17 @@ def _audio_array_and_sr(
     if isinstance(audio_payload, dict):
         raw_array = audio_payload.get("array")
         src_sr = audio_payload.get("sampling_rate") or HF_NATIVE_SAMPLE_RATE
+        if raw_array is None and ("bytes" in audio_payload or "path" in audio_payload):
+            import io
+            import soundfile as sf
+            audio_bytes = audio_payload.get("bytes")
+            if audio_bytes:
+                data, src_sr = sf.read(io.BytesIO(audio_bytes))
+                return np.asarray(data, dtype=np.float32), int(src_sr)
+            audio_path = audio_payload.get("path")
+            if audio_path and os.path.exists(audio_path):
+                data, src_sr = sf.read(audio_path)
+                return np.asarray(data, dtype=np.float32), int(src_sr)
         if raw_array is None:
             raise ValueError(f"HF row missing audio array (file={row.get('file')!r})")
         return np.asarray(raw_array, dtype=np.float32), int(src_sr)
@@ -341,6 +352,11 @@ class HuggingFaceHiFiTTSDataset(Dataset):
             load_kwargs["token"] = token
 
         hf_ds = load_dataset(repo_id, subset, split=split, streaming=False, **load_kwargs)
+        try:
+            from datasets import Audio
+            hf_ds = hf_ds.cast_column("audio", Audio(decode=False))
+        except Exception:
+            pass
         self._hf = hf_ds
         self._index: List[int] = []
         self._lengths: List[int] = []  # resampled audio lengths, index-aligned
@@ -498,6 +514,11 @@ class StreamingHiFiTTSDataset(IterableDataset):
         ds = load_dataset(
             self.repo_id, self.subset, split=self.split, streaming=True, **load_kwargs
         )
+        try:
+            from datasets import Audio
+            ds = ds.cast_column("audio", Audio(decode=False))
+        except Exception:
+            pass
         if self.world_size > 1 and hasattr(ds, "shard"):
             try:
                 ds = ds.shard(num_shards=self.world_size, index=self.rank)

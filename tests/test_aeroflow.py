@@ -372,3 +372,40 @@ def test_expand_matches_per_item_oracle():
         assert torch.equal(got[b, :, :Tb], ref[0])
         assert (got[b, :, Tb:] == 0).all()
 
+
+def test_stft_non_contiguous_gradient_stability():
+    """STFT and IF losses must handle non-contiguous input slices with valid gradients."""
+    from aeroflow.losses.losses import MultiResolutionSTFTLoss, InstantaneousFrequencyLoss
+    mr_stft = MultiResolutionSTFTLoss()
+    if_loss = InstantaneousFrequencyLoss()
+
+    # Create larger tensors and take non-contiguous slices
+    y_full = torch.randn(2, 48000)
+    y_hat_full = torch.randn(2, 48000, requires_grad=True)
+
+    y_slice = y_full[:, :36000]
+    y_hat_slice = y_hat_full[:, :36000]
+    assert not y_slice.is_contiguous()
+    assert not y_hat_slice.is_contiguous()
+
+    # MultiResolutionSTFTLoss forward & backward
+    loss_stft = mr_stft(y_slice, y_hat_slice)
+    assert torch.isfinite(loss_stft)
+    loss_stft.backward(retain_graph=True)
+    assert torch.isfinite(y_hat_full.grad).all()
+
+    # Reset grads
+    y_hat_full.grad = None
+
+    # InstantaneousFrequencyLoss forward & backward
+    loss_if = if_loss(y_slice, y_hat_slice)
+    assert torch.isfinite(loss_if)
+    loss_if.backward()
+    assert torch.isfinite(y_hat_full.grad).all()
+
+
+def test_cleanup_cuda_memory_no_crash():
+    from scripts.train_kaggle import cleanup_cuda_memory
+    cleanup_cuda_memory(torch.device("cpu"))
+
+

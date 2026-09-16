@@ -118,6 +118,9 @@ def setup_environment(seed: int = 42) -> Tuple[torch.device, int, int, int, bool
     Initializes DDP process group or single-device environment.
     Returns: (device, rank, world_size, local_rank, is_distributed)
     """
+    # Prevent CUDA virtual memory fragmentation across long training runs
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
     torch.set_num_threads(2)
     random.seed(seed)
     np.random.seed(seed)
@@ -153,7 +156,32 @@ def setup_environment(seed: int = 42) -> Tuple[torch.device, int, int, int, bool
         local_rank = 0
         is_distributed = False
 
+    if torch.cuda.is_available():
+        # Limit cuFFT plan cache capacity (PyTorch default is 4096 per GPU).
+        # In TTS with dynamic audio lengths, caching 4096 plans hoards gigabytes
+        # of GPU workspace memory outside the allocator, causing CUFFT_INTERNAL_ERROR.
+        # 32 plans is plenty for active batch resolutions within length buckets.
+        try:
+            for dev_idx in range(torch.cuda.device_count()):
+                torch.backends.cuda.cufft_plan_cache[dev_idx].max_size = 32
+        except Exception:
+            pass
+
     return device, rank, world_size, local_rank, is_distributed
+
+
+def cleanup_cuda_memory(device: torch.device) -> None:
+    """
+    Evicts cached cuFFT plans and releases unreserved PyTorch CUDA blocks
+    to avoid memory fragmentation over long training runs.
+    """
+    if device.type == "cuda" and torch.cuda.is_available():
+        try:
+            dev_idx = device.index if device.index is not None else 0
+            torch.backends.cuda.cufft_plan_cache[dev_idx].clear()
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
 
 
 def save_atomic_checkpoint(
@@ -385,7 +413,8 @@ def train():
                         help="Comma-separated speaker id(s) to keep (default '9017' single-voice). "
                              "Use 'all' for every speaker.")
     parser.add_argument("--hf-min-duration", type=float, default=0.5)
-    parser.add_argument("--hf-max-duration", type=float, default=12.0)
+    parser.add_argument("--hf-max-duration", type=float, default=10.0,
+                        help="Max clip duration in seconds (default 10.0s, bounds peak MR-STFT memory on 16GB GPUs)")
     parser.add_argument("--hf-cache-dir", type=str, default=None,
                         help="HF datasets cache dir. Default auto-resolves to "
                              "/kaggle/tmp/hf_cache on Kaggle (the ~40 GB corpus "
@@ -762,20 +791,22 @@ def train():
                 )
 
             # Atomic checkpoint saving
-            if is_master and (global_step % args.save_interval_steps == 0):
-                save_atomic_checkpoint(
-                    latest_ckpt_path, model, optimizer, scaler, scheduler,
-                    global_step, epoch, best_loss, is_distributed
-                )
-                print(f"  --> [Checkpoint] Saved latest checkpoint to {latest_ckpt_path} (step {global_step})")
-
-                if loss_total.item() < best_loss:
-                    best_loss = loss_total.item()
+            if global_step % args.save_interval_steps == 0:
+                cleanup_cuda_memory(device)
+                if is_master:
                     save_atomic_checkpoint(
-                        best_ckpt_path, model, optimizer, scaler, scheduler,
+                        latest_ckpt_path, model, optimizer, scaler, scheduler,
                         global_step, epoch, best_loss, is_distributed
                     )
-                    print(f"  --> [Checkpoint] New best loss {best_loss:.4f}! Saved to {best_ckpt_path}")
+                    print(f"  --> [Checkpoint] Saved latest checkpoint to {latest_ckpt_path} (step {global_step})")
+
+                    if loss_total.item() < best_loss:
+                        best_loss = loss_total.item()
+                        save_atomic_checkpoint(
+                            best_ckpt_path, model, optimizer, scaler, scheduler,
+                            global_step, epoch, best_loss, is_distributed
+                        )
+                        print(f"  --> [Checkpoint] New best loss {best_loss:.4f}! Saved to {best_ckpt_path}")
 
             # Periodic listening samples (master only, never fatal)
             if is_master and args.sample_interval_steps > 0 and global_step % args.sample_interval_steps == 0:
@@ -785,7 +816,8 @@ def train():
                 if paths:
                     print(f"  --> [Samples] Wrote {len(paths)} sample(s) to {sample_dir} (step {global_step})")
 
-        # End of epoch checkpoint
+        # End of epoch cleanup and checkpoint
+        cleanup_cuda_memory(device)
         if is_master:
             avg_epoch_loss = epoch_loss / max(1, batches_in_epoch)
             print(f"[Epoch {epoch:03d} Complete] Avg Loss: {avg_epoch_loss:.4f}")
@@ -793,6 +825,9 @@ def train():
                 latest_ckpt_path, model, optimizer, scaler, scheduler,
                 global_step, epoch + 1, best_loss, is_distributed
             )
+
+        if is_distributed:
+            dist.barrier()
 
     if is_master:
         print("\n" + "=" * 80)

@@ -143,10 +143,10 @@ class SingleResolutionSTFTLoss(nn.Module):
         y = y.float()
         y_hat = y_hat.float()
 
-        # Ensure identical lengths
+        # Ensure identical lengths and contiguous layout for cuFFT / autograd
         min_len = min(y.shape[-1], y_hat.shape[-1])
-        y = y[..., :min_len]
-        y_hat = y_hat[..., :min_len]
+        y = y[..., :min_len].contiguous()
+        y_hat = y_hat[..., :min_len].contiguous()
 
         S = torch.stft(
             y, n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.win_length,
@@ -259,9 +259,10 @@ class InstantaneousFrequencyLoss(nn.Module):
         y = y.float()
         y_hat = y_hat.float()
 
+        # Ensure identical lengths and contiguous layout for cuFFT / autograd
         min_len = min(y.shape[-1], y_hat.shape[-1])
-        y = y[..., :min_len]
-        y_hat = y_hat[..., :min_len]
+        y = y[..., :min_len].contiguous()
+        y_hat = y_hat[..., :min_len].contiguous()
 
         S = torch.stft(
             y, n_fft=self.n_fft, hop_length=self.hop_length, win_length=self.win_length,
