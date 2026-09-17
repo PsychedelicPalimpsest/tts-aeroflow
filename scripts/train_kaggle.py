@@ -259,10 +259,14 @@ def resume_from_checkpoint(
     scaler: Any,
     scheduler: Optional[Any],
     device: torch.device,
-    is_distributed: bool
+    is_distributed: bool,
+    reset_lr: bool = False,
+    new_lr: Optional[float] = None,
+    finetune: bool = False
 ) -> Tuple[int, int, float]:
     """
     Restores model weights, optimizer momentum, scaler scale, scheduler state, and RNG states.
+    Supports reset_lr and finetune modes for fine-tuning or voice transfer.
     Returns: (global_step, epoch, best_loss)
     """
     checkpoint = torch.load(str(checkpoint_path), map_location=device, weights_only=False)
@@ -275,21 +279,40 @@ def resume_from_checkpoint(
 
     raw_model = model.module if is_distributed else model
     raw_model.load_state_dict(checkpoint["model"])
-    optimizer.load_state_dict(checkpoint["optimizer"])
 
-    if scaler is not None and checkpoint.get("scaler") is not None and hasattr(scaler, "load_state_dict"):
-        scaler.load_state_dict(checkpoint["scaler"])
+    if not finetune:
+        optimizer.load_state_dict(checkpoint["optimizer"])
 
-    if scheduler is not None and checkpoint.get("scheduler") is not None:
-        scheduler.load_state_dict(checkpoint["scheduler"])
+        if scaler is not None and checkpoint.get("scaler") is not None and hasattr(scaler, "load_state_dict"):
+            scaler.load_state_dict(checkpoint["scaler"])
 
-    global_step = checkpoint.get("global_step", 0)
-    epoch = checkpoint.get("epoch", 0)
-    best_loss = checkpoint.get("best_loss", float("inf"))
+        if scheduler is not None and checkpoint.get("scheduler") is not None and not reset_lr:
+            scheduler.load_state_dict(checkpoint["scheduler"])
+    else:
+        # Fine-tuning: retain fresh optimizer, scaler, and scheduler
+        pass
 
-    _restore_rng_states(checkpoint.get("rng_state", {}))
+    if reset_lr and not finetune:
+        target_lr = new_lr if new_lr is not None else 2e-4
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = target_lr
+            param_group["initial_lr"] = target_lr
+        optimizer.state.clear()
+
+    if finetune:
+        global_step = 0
+        epoch = 0
+        best_loss = float("inf")
+    else:
+        global_step = checkpoint.get("global_step", 0)
+        epoch = checkpoint.get("epoch", 0)
+        best_loss = checkpoint.get("best_loss", float("inf"))
+
+    if not finetune:
+        _restore_rng_states(checkpoint.get("rng_state", {}))
 
     return global_step, epoch, best_loss
+
 
 
 def _restore_rng_states(rng: Any) -> None:
@@ -427,7 +450,13 @@ def train():
     parser.add_argument("--checkpoint-dir", type=str, default="/kaggle/working/checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--resume-path", type=str, default=None, help="Explicit checkpoint path to resume from")
     parser.add_argument("--auto-resume", action="store_true", default=True, help="Auto-search for existing checkpoints")
+    parser.add_argument("--reset-lr", action="store_true", default=False,
+                        help="Reset learning rate and scheduler when resuming from checkpoint (uses --lr).")
+    parser.add_argument("--finetune", action="store_true", default=False,
+                        help="Voice transfer / fine-tuning mode: resumes model weights but resets "
+                             "global step, epoch, optimizer momentum, and scheduler for a new voice.")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size per GPU")
+
     parser.add_argument("--epochs", type=int, default=100, help="Total number of training epochs")
     parser.add_argument("--num-workers", type=int, default=2,
                         help="DataLoader workers per GPU process (default 2: matches 4-vCPU Kaggle hosts)")
@@ -660,11 +689,36 @@ def train():
             print(f"\n[Checkpoint Resume] Found existing checkpoint at: {ckpt_to_load}")
             print(f"                    Restoring weights, optimizer, scaler, and RNG states...")
         global_step, start_epoch, best_loss = resume_from_checkpoint(
-            ckpt_to_load, model, optimizer, scaler, scheduler, device, is_distributed
+            ckpt_to_load, model, optimizer, scaler, scheduler, device, is_distributed,
+            reset_lr=args.reset_lr, new_lr=args.lr, finetune=args.finetune
         )
-        if is_master:
-            print(f"[Checkpoint Resume] Successfully resumed from Global Step {global_step}, Epoch {start_epoch}!")
-            print(f"                    Previous best loss: {best_loss:.4f}\n")
+        if args.finetune:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=args.epochs * steps_per_epoch,
+                eta_min=1e-5
+            )
+            if is_master:
+                print(f"[Voice Transfer / Fine-Tuning] Resumed model weights from: {ckpt_to_load}")
+                print(f"                               Reset global_step to 0, epoch to 0, best_loss to inf.")
+                print(f"                               Optimizer momentum cleared, LR initialized to {args.lr:.2e}.")
+                print(f"                               Scheduler fresh for {args.epochs * steps_per_epoch} steps.\n")
+        elif args.reset_lr:
+            remaining_epochs = max(1, args.epochs - start_epoch)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=remaining_epochs * steps_per_epoch,
+                eta_min=1e-5
+            )
+            if is_master:
+                print(f"[Learning Rate Reset] Resumed model weights from: {ckpt_to_load}")
+                print(f"                      Reset learning rate to {args.lr:.2e}.")
+                print(f"                      Optimizer momentum cleared. Scheduler re-initialized for remaining steps.\n")
+        else:
+            if is_master:
+                print(f"[Checkpoint Resume] Successfully resumed from Global Step {global_step}, Epoch {start_epoch}!")
+                print(f"                    Previous best loss: {best_loss:.4f}\n")
+
 
     # 6. Wall-Clock Watchdog
     start_wall_time = time.time()

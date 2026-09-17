@@ -83,3 +83,57 @@ def test_foreign_checkpoint_refused_explicitly(tmp_path):
     with pytest.raises(ValueError, match="not an AeroFlow checkpoint"):
         tk.resume_from_checkpoint(foreign, model, opt, None, None,
                                   torch.device("cpu"), False)
+
+
+def test_resume_reset_lr(tmp_path):
+    tk = _import_train_module()
+    model, opt = _tiny_setup()
+    # Populate some dummy optimizer momentum state
+    loss = model(torch.randn(2, 8)).sum()
+    loss.backward()
+    opt.step()
+    assert len(opt.state) > 0
+
+    ckpt = tmp_path / "checkpoint_latest.pt"
+    tk.save_atomic_checkpoint(ckpt, model, opt, None, None, 50, 5, 1.2, False)
+
+    model2 = torch.nn.Linear(8, 8)
+    opt2 = torch.optim.AdamW(model2.parameters(), lr=1e-3)
+    step, epoch, best = tk.resume_from_checkpoint(
+        ckpt, model2, opt2, None, None, torch.device("cpu"), False,
+        reset_lr=True, new_lr=5e-5
+    )
+    assert (step, epoch, best) == (50, 5, 1.2)
+    assert opt2.param_groups[0]["lr"] == 5e-5
+    assert opt2.param_groups[0]["initial_lr"] == 5e-5
+    assert len(opt2.state) == 0  # Stale momentum flushed
+    for p1, p2 in zip(model.parameters(), model2.parameters()):
+        assert torch.equal(p1, p2)
+
+
+def test_resume_finetune(tmp_path):
+    tk = _import_train_module()
+    model, opt = _tiny_setup()
+    loss = model(torch.randn(2, 8)).sum()
+    loss.backward()
+    opt.step()
+    assert len(opt.state) > 0
+
+    ckpt = tmp_path / "checkpoint_latest.pt"
+    tk.save_atomic_checkpoint(ckpt, model, opt, None, None, 100, 10, 0.8, False)
+
+    model2 = torch.nn.Linear(8, 8)
+    opt2 = torch.optim.AdamW(model2.parameters(), lr=4e-5)
+    step, epoch, best = tk.resume_from_checkpoint(
+        ckpt, model2, opt2, None, None, torch.device("cpu"), False,
+        finetune=True, new_lr=4e-5
+    )
+    # Step, epoch, best_loss are reset for new voice
+    assert step == 0
+    assert epoch == 0
+    assert best == float("inf")
+    assert opt2.param_groups[0]["lr"] == 4e-5
+    assert len(opt2.state) == 0  # Stale momentum flushed
+    for p1, p2 in zip(model.parameters(), model2.parameters()):
+        assert torch.equal(p1, p2)
+

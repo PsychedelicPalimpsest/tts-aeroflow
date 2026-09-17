@@ -110,6 +110,33 @@ pipeline is the bottleneck:
 ### Option C: Synthetic Dataset Verification (No Dataset Required)
 If no external dataset is mounted, omitting `--manifest-path` automatically triggers the built-in `SyntheticHiFiTTSDataset` which generates synthetic 24 kHz baritone audio matching Speaker 9017 acoustic characteristics for immediate dry-run and stress verification.
 
+### Option D: Voice Transfer / Fine-Tuning a New Speaker (`--finetune`, `--reset-lr`)
+When adapting an existing checkpoint to a new voice (e.g. switching speaker ID from 9017 to 6097 or loading a custom manifest), use `--finetune`:
+- Loads pretrained Conformer, ODE Vector Field, and Complex STFT Decoder weights.
+- Resets `global_step = 0`, `epoch = 0`, and `best_loss = inf`.
+- Flushes stale AdamW momentum buffers from the previous speaker.
+- Restarts the Cosine scheduler cleanly from step 0 with the fine-tuning `--lr` (recommended: `5e-5`).
+
+```bash
+torchrun --nproc_per_node=2 scripts/train_kaggle.py \
+    --dataset-source hf-streaming \
+    --hf-repo-id MikhailT/hifi-tts \
+    --hf-subset clean --hf-split train --hf-speaker 6097 \
+    --resume-path "/kaggle/input/aeroflow-checkpoints/checkpoint_latest.pt" \
+    --finetune \
+    --lr 5e-5 \
+    --epochs 30 --max-hours 11.2
+```
+
+To simply reset the learning rate without resetting the step/epoch counters, use `--reset-lr`:
+```bash
+torchrun --nproc_per_node=2 scripts/train_kaggle.py \
+    --resume-path "/kaggle/working/checkpoints/checkpoint_latest.pt" \
+    --reset-lr \
+    --lr 1e-4
+```
+
+
 ---
 
 ## 4. Complete Kaggle Notebook Execution Cells
