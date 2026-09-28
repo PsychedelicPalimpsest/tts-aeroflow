@@ -194,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--alpha", type=float, default=1.0, help="Speech tempo: larger is slower (default: 1.0)")
     parser.add_argument("--chunk-tokens", type=int, default=240, help="Target phoneme-token limit per chunk (default: 240); complete sentences and words stay intact")
     parser.add_argument("--phase-iterations", type=int, default=0, help="Optional phase-refinement iterations (default: off)")
+    parser.add_argument("--pronunciation-lexicon", type=Path, help="Audited speaker pronunciation overrides JSON")
     parser.add_argument("--voicefixer", action="store_true", help="Optional speech-restoration pass after all text chunks are joined (requires voicefixer package)")
     parser.add_argument("--voicefixer-mode", type=int, choices=(0, 1), default=0, help="VoiceFixer mode: 0 standard (default), 1 with high-frequency preprocessing")
     parser.add_argument("--seed", type=int, default=1234, help="Random seed for repeatable synthesis")
@@ -226,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
 
         torch.manual_seed(args.seed)
         model = AeroFlowTTS().to(device).eval()
+        if args.pronunciation_lexicon:
+            model.phonemizer.load_lexicon_overrides(args.pronunciation_lexicon)
         try:
             # AeroFlow training checkpoints also contain NumPy/Python RNG state,
             # which the restricted weights-only loader cannot deserialize.

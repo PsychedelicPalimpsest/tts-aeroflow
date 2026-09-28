@@ -537,6 +537,13 @@ class StreamingHiFiTTSDataset(IterableDataset):
                 self.speaker_ids, self.min_duration_s, self.max_duration_s,
             ):
                 continue
+            decisions = getattr(self, "pronunciation_decisions", None)
+            if decisions is not None:
+                from aeroflow.dataset.pronunciation import decision_key, text_digest
+                decision = decisions.get(decision_key(str(row.get("speaker", "")),
+                                                      str(row.get("file", ""))))
+                if decision is None or decision["text_sha256"] != text_digest(text):
+                    continue
             try:
                 yield process_hf_row(
                     row,

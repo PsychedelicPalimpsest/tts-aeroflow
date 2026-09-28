@@ -61,6 +61,9 @@ from aeroflow import (
     default_hf_cache_dir,
 )
 from aeroflow.dataset.bucket import BucketBatchSampler, dataset_lengths
+from aeroflow.dataset.pronunciation import (
+    PronunciationFilteredDataset, PronunciationFilteredStream, load_decisions,
+)
 from torch.utils.data import IterableDataset
 
 
@@ -427,6 +430,8 @@ def train():
                              "'hf-streaming' (streaming=True, no local copy, O(1) RAM), "
                              "'synthetic' (fallback), or 'auto' (manifest/ljspeech if "
                              "found else synthetic)")
+    parser.add_argument("--pronunciation-manifest", type=str, default=None,
+                        help="JSONL from scripts/audit_pronunciations.py; train only accepted clips with their corrected phonemes")
     parser.add_argument("--ljspeech-root", type=str, default=None,
                         help="LJSpeech dataset root holding metadata.csv and audio/ or wavs/ "
                              "(e.g. /data/LJSpeech-1.1). May also point at metadata.csv itself.")
@@ -620,6 +625,15 @@ def train():
             sample_rate=24000,
             hop_length=240
         )
+
+    if args.pronunciation_manifest:
+        decisions = load_decisions(args.pronunciation_manifest)
+        if isinstance(dataset, IterableDataset):
+            dataset = PronunciationFilteredStream(dataset, decisions)
+        else:
+            dataset = PronunciationFilteredDataset(dataset, decisions)
+        if is_master:
+            print(f"[Pronunciation] Loaded {len(decisions)} accepted decisions from {args.pronunciation_manifest}")
 
     is_streaming_ds = isinstance(dataset, IterableDataset)
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if (is_distributed and not is_streaming_ds) else None

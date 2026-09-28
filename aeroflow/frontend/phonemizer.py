@@ -8,7 +8,9 @@ Provides:
 - Bidirectional token mapping (phonemes <-> integer IDs in [0, 83]).
 """
 
+import json
 import re
+from pathlib import Path
 from typing import Dict, List, Optional
 from aeroflow.frontend.text_norm import TextNormalizer
 
@@ -487,10 +489,24 @@ class Phonemizer:
 
     def __init__(self):
         self.normalizer = TextNormalizer()
-        self.lexicon = _CMUDICT
+        self.lexicon = dict(_CMUDICT)
         self.vocab = ALL_TOKENS
         self.phoneme_to_id = PHONEME_TO_ID
         self.id_to_phoneme = ID_TO_PHONEME
+
+    def load_lexicon_overrides(self, path: str | Path) -> None:
+        """Apply audited word pronunciations to this phonemizer instance."""
+        with open(path, encoding="utf-8") as stream:
+            payload = json.load(stream)
+        overrides = payload.get("overrides")
+        if not isinstance(overrides, dict):
+            raise ValueError("Pronunciation lexicon must contain an 'overrides' object")
+        for word, phones in overrides.items():
+            if (not isinstance(word, str) or not word or not isinstance(phones, list)
+                    or not phones or any(p not in PHONEME_TO_ID or p in SPECIAL_TOKENS + PUNCTUATION_TOKENS
+                                       for p in phones)):
+                raise ValueError(f"Invalid pronunciation override for {word!r}")
+            self.lexicon[word.lower()] = list(phones)
 
     def _fallback_lts(self, word: str) -> List[str]:
         """Deterministic rule-based letter-to-sound for unknown words."""

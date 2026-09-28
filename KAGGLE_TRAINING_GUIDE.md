@@ -38,6 +38,63 @@ Kaggle strictly terminates notebooks after 12.0 hours. To prevent abrupt SIGKILL
 
 ## 3. Dataset Setup on Kaggle
 
+### Optional: audit pronunciations before training
+
+The offline audit listens to each clip with an ARPAbet CTC phone recognizer,
+compares it with the project's phonemizer and CMUdict alternatives, and writes
+an accepted/rejected JSONL decision. It also tries conservative postvocalic
+`R` deletion and intervocalic `T`/`D` flapping. An accepted decision contains
+the exact phoneme sequence used by the trainer. Rejected clips are absent from
+the training index. This does **not** identify every accent feature or prove
+that every accepted transcript is correct. Inspect the `changes`, `heard`, and
+`reason` fields and tune the error threshold on a small sample before auditing
+the full corpus.
+
+Run the audit in a separate Kaggle session from training. Install the extra
+packages and save its JSONL output as a Kaggle dataset, so you can attach it
+to every later training session:
+
+```bash
+pip install -q cmudict transformers faster-whisper
+python scripts/audit_pronunciations.py \
+    --source hf-streaming --hf-speaker 9017 --limit 200 \
+    --output /kaggle/working/pronunciation_sample.jsonl \
+    --lexicon-output /kaggle/working/pronunciation_lexicon.json
+```
+
+After reviewing that sample, omit `--limit` and save the full output as
+`pronunciations.jsonl`. The default recognizer is
+[`huper29/huper_recognizer`](https://huggingface.co/huper29/huper_recognizer),
+which requires a one-time model download. The audit reads one clip at a time
+and uses one GPU. For a local manifest, use `--source manifest
+--manifest-path /kaggle/input/.../manifest.json --audio-dir /kaggle/input/.../audio`.
+For LJSpeech, use `--source ljspeech --ljspeech-root /kaggle/input/...`.
+The audit only reads audio; its output stores IDs and phoneme labels.
+For a corpus that exceeds one session, pass `--new-items 50000` and continue
+in another session with `--resume-from /kaggle/input/<previous-audit>/pronunciations.jsonl`
+and a new `--output` path. The new file copies prior decisions and adds more.
+
+Train on the same dataset source, speaker, split, and transcripts used by the
+audit, adding this flag to the usual `torchrun` command:
+
+```bash
+    --pronunciation-manifest /kaggle/input/<audit-dataset>/pronunciations.jsonl
+```
+
+The default `--max-error-ratio 0.15` accepts strong phone matches directly.
+Clips with phone error up to `--rescue-max-error-ratio 0.20` are accepted only
+when a separate Faster-Whisper `base.en` transcript check has word error at
+most `--max-asr-wer 0.10`. That model runs on CPU by default and adds one-time
+preprocessing time. Set `--asr-model none` to use phone matching alone. These
+thresholds are starting points, not calibrated quality guarantees. A phone
+recognizer can mistake a regional sound for a standard phone; a matching
+Whisper transcript supports the words but does not prove the phonemes. Review
+both accepted and rejected clips before using the decisions for a full run.
+The optional lexicon file records a changed word only after at least three
+accepted examples agree on the same pronunciation in at least 80% of that
+word's accepted occurrences. Pass it to inference with
+`python -m aeroflow "Text." --pronunciation-lexicon /path/to/pronunciation_lexicon.json`.
+
 ### Option A: Hi-Fi TTS Speaker 9017 Dataset
 1. In the Kaggle notebook sidebar, click **Add Input** $\to$ **Datasets**.
 2. Search for `hifi-tts` or upload the Speaker 9017 subset (`9017_manifest.json` and `audio/`).
