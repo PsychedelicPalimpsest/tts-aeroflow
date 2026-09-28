@@ -625,6 +625,46 @@ class Phonemizer:
                     i += 2
                     continue
 
+            # Check common Latin/English suffixes near end of word
+            rem = w_len - i
+            if rem == 4:
+                quad = word[i:]
+                if quad == "tion":
+                    phones.extend(["SH", "AH0", "N"])
+                    break
+                elif quad == "sion":
+                    phones.extend(["ZH", "AH0", "N"])
+                    break
+                elif quad in ("able", "ible"):
+                    phones.extend(["AH0", "B", "AH0", "L"])
+                    break
+                elif quad == "ment":
+                    phones.extend(["M", "AH0", "N", "T"])
+                    break
+                elif quad == "ness":
+                    phones.extend(["N", "AH0", "S"])
+                    break
+                elif quad == "less":
+                    phones.extend(["L", "AH0", "S"])
+                    break
+            elif rem == 3:
+                tri = word[i:]
+                if tri == "ous":
+                    phones.extend(["AH0", "S"])
+                    break
+                elif tri == "ful":
+                    phones.extend(["F", "AH0", "L"])
+                    break
+                elif tri == "ing":
+                    phones.extend(["IH0", "NG"])
+                    break
+
+            # Reduce identical double consonants (e.g. tt, bb, dd, ff, gg, ll, mm, nn, pp, rr, ss, zz)
+            if i + 1 < w_len and word[i] == word[i + 1] and word[i] in _CHAR_TO_PHONE:
+                phones.extend(_CHAR_TO_PHONE[word[i]])
+                i += 2
+                continue
+
             # Check silent-e long vowel
             if has_silent_e and i == w_len - 3:
                 vowel = word[i]
@@ -658,6 +698,15 @@ class Phonemizer:
         clean_word = word.replace("'", "")
         if clean_word in self.lexicon:
             return list(self.lexicon[clean_word])
+        # Check hyphenated compound word
+        if "-" in word and not word.startswith("-") and not word.endswith("-"):
+            subwords = [sw for sw in word.split("-") if sw]
+            if subwords:
+                sub_phones = []
+                for sw in subwords:
+                    sub_phones.extend(self.phonemize_word(sw))
+                if sub_phones:
+                    return sub_phones
         return self._fallback_lts(word)
 
     def phonemize(self, text: str, add_bos_eos: bool = True) -> List[str]:

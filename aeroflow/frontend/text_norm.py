@@ -209,6 +209,7 @@ class TextNormalizer:
         text = text.replace("“", '"').replace("”", '"')
         text = text.replace("‘", "'").replace("’", "'")
         text = text.replace("—", ", ").replace("–", ", ")
+        text = re.sub(r"-{2,}", ", ", text)
         text = text.replace("…", "...")
 
         # Context-dependent Saint vs Street expansion

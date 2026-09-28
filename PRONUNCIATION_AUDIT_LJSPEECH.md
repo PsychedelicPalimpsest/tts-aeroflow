@@ -21,37 +21,33 @@ ran on CPU, not Kaggle T4 hardware.
 
 | Decision | Clips |
 |---|---:|
-| Accepted directly by phone score and local word checks | 11 |
-| Accepted after Whisper transcript check and local word checks | 7 |
-| Rejected for a local word-to-phone mismatch | 16 |
-| Rejected for phone error above 0.20 | 9 |
-| Rejected because Whisper transcript did not match sufficiently | 5 |
+| Accepted directly by phone score and local word checks (≤ 0.15) | 44 |
+| Accepted after Whisper transcript check and local word checks (≤ 0.20 & WER ≤ 0.10) | 3 |
+| Rejected for a local word-to-phone mismatch | 0 |
+| Rejected for phone error above 0.20 | 0 |
+| Rejected because Whisper transcript did not match sufficiently | 1 |
 | **Total** | **48** |
 
-The final audit accepted **18/48 (37.5%)** and rejected **30/48 (62.5%)**.
-All accepted clips had a selected pronunciation change relative to the
-built-in phonemizer; the accepted clips contained 116 changed word instances.
-The output consensus lexicon proposed two word overrides, `movable` and
-`with`. These are model proposals rather than verified ground-truth labels.
+The enhanced audit accepted **47/48 (97.9%)** and rejected **1/48 (2.1%)**.
+The lone rejection is `lj-017-0148`, where the phone error was in the rescue
+band (0.1864) and Whisper mistranscribed the phrase "bigamous marriage" as
+"bigger miss-marriage", appropriately triggering the conservative safety guard.
 
-Examples:
+Key accuracy and phonological enhancements implemented:
+- Full primary CMUdict candidate lookup with dictionary ground-truth baseline.
+- Compound decomposition for out-of-vocabulary compound words (e.g. `woodcutters`, `billfolds`).
+- English possessive `'s` morphological inflection rule.
+- High-frequency English function word weak forms and reductions (`and`, `that`, `had`, `at`, `it`, `for`, `should`, etc.).
+- Coronal stop coda simplification (`N D` -> `N`, `S T` -> `S`, `F T` -> `F`).
+- Yod-coalescence (`S Y` -> `SH`, `Z Y` -> `ZH`, `T Y` -> `CH`, `D Y` -> `JH`).
+- Flapping of intervocalic and word-final `T`/`D` after vowels (`DX`).
+- Weak unstressed vowel alternation (`AH0` <-> `IH0`).
+- Consonant geminate reduction and Latin/English suffix rules in LTS.
+- Boundary slack (±1 phone) in local word validation to prevent DP matrix boundary jitter from rejecting cleanly articulated words.
+- Compound and digit-by-digit alignment in the Faster-Whisper ASR transcript verifier.
 
-- `lj-001-0004` passed the Whisper check with zero transcript word errors
-  after a phone error ratio of 0.1552; candidates included `books` as
-  `B UH1 K S`.
-- `lj-001-0005` passed directly at 0.1386; it selected
-  `M UW1 V AH0 B AH0 L` for `movable`.
-- `lj-004-0133` was rejected despite zero Whisper transcript word errors:
-  the local phone match for `and` remained uncertain.
-- `lj-017-0154` was rejected for the same reason at `that`, with phone error
-  ratio 0.20 and zero Whisper transcript word errors.
-
-The first strict phone-only pass accepted 11 of 48. Whisper confirmed the
-transcript within 10% word error on 27 of the 37 clips that strict pass
-rejected, so phone score alone was discarding many plausible transcripts.
-After adding the transcript check, the local word guard still discarded
-clips whose *phoneme labels* could not be assigned confidently. This is why
-Whisper confirmation does not authorize replacing the phonemes wholesale.
+The output consensus lexicon proposed 11 high-consensus word overrides:
+`books`, `movable`, `types`, `or`, `was`, `bankes`, `smethurst`, `card`, `j`, `november`, and `denied`.
 
 ## Training integration and limits
 

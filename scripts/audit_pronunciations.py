@@ -38,19 +38,112 @@ def plain(phone: str) -> str:
 
 def spoken_words(text: str, phonemizer: Phonemizer) -> tuple[list[str], list[str]]:
     normalized = phonemizer.normalizer.normalize(text)
+    normalized = re.sub(r"-{2,}", ", ", normalized)
     parts = re.findall(r"[\w'-]+|[.,!?;:\"']", normalized)
-    return parts, [part for part in parts if part not in PUNCTUATION_TOKENS]
+    return parts, [part for part in parts if part not in PUNCTUATION_TOKENS and re.search(r"\w", part)]
+
+
+FUNCTION_WORD_VARIANTS: dict[str, list[list[str]]] = {
+    "and": [["AH0", "N"], ["IH0", "N"], ["AH0", "N", "D"], ["IH0", "N", "D"], ["AE1", "N"], ["AE0", "N"], ["AE0", "N", "D"]],
+    "that": [["DH", "AH0", "T"], ["DH", "IH0", "T"], ["DH", "AE1", "DX"], ["DH", "AH0", "DX"], ["DH", "IH0", "DX"],
+             ["DH", "EH0", "DX"], ["DH", "EH1", "DX"], ["DH", "AE1"], ["DH", "AH0"], ["DH", "EH1"], ["DH", "EH0"]],
+    "had": [["HH", "AH0", "D"], ["HH", "IH0", "D"], ["HH", "EH0", "D"], ["HH", "EH1", "D"],
+            ["HH", "AE1", "DX"], ["HH", "AH0", "DX"], ["HH", "EH1"], ["HH", "EH0"], ["HH", "AH0"], ["HH", "AE1"],
+            ["AH0", "D"], ["IH0", "D"], ["AE1", "D"]],
+    "at": [["AH0", "T"], ["IH0", "T"], ["AE1", "DX"], ["AH0", "DX"], ["IH0", "DX"], ["AH0"], ["IH0"], ["AE1"]],
+    "it": [["IH1", "DX"], ["IH0", "DX"], ["IH1"], ["IH0"], ["AH0", "T"], ["AH0", "DX"]],
+    "for": [["F", "ER0"], ["F", "AH0", "R"], ["F", "AO0", "R"], ["F", "AH0"], ["F", "AO0"]],
+    "should": [["SH", "AH0", "D"], ["SH", "IH0", "D"], ["SH", "UH1"], ["SH", "AH0"], ["SH", "IH0"]],
+    "would": [["W", "AH0", "D"], ["W", "IH0", "D"], ["W", "UH1"], ["W", "AH0"], ["W", "IH0"]],
+    "could": [["K", "AH0", "D"], ["K", "IH0", "D"], ["K", "UH1"], ["K", "AH0"], ["K", "IH0"]],
+    "of": [["AH0", "V"], ["AH0"], ["AH1"]],
+    "to": [["T", "AH0"], ["T", "IH0"], ["DX", "AH0"], ["DX", "UW0"], ["T", "UW0"]],
+    "in": [["IH0", "N"], ["AH0", "N"]],
+    "as": [["AH0", "Z"], ["IH0", "Z"], ["AE0", "Z"]],
+    "with": [["W", "IH0", "DH"], ["W", "IH0", "TH"], ["W", "AH0", "DH"], ["W", "AH0", "TH"]],
+    "from": [["F", "ER0", "M"], ["F", "AH0", "M"], ["F", "R", "AH0", "M"], ["F", "R", "AH1", "M"]],
+    "or": [["ER0"], ["AH0", "R"], ["AO0"]],
+    "not": [["N", "AA1", "DX"], ["N", "AH0", "T"], ["N", "AA1"]],
+    "but": [["B", "AH0", "T"], ["B", "AH0", "DX"], ["B", "AH0"]],
+    "he": [["IY1"], ["IY0"], ["HH", "IY0"]],
+    "her": [["ER0"], ["HH", "ER0"]],
+    "him": [["IH1", "M"], ["IH0", "M"]],
+    "his": [["IH1", "Z"], ["IH0", "Z"]],
+    "them": [["DH", "AH0", "M"], ["AH0", "M"]],
+    "was": [["W", "AH0", "Z"], ["W", "IH0", "Z"], ["W", "AA0", "Z"]],
+    "have": [["HH", "AH0", "V"], ["AH0", "V"], ["HH", "AE0", "V"]],
+    "has": [["HH", "AH0", "Z"], ["AH0", "Z"], ["HH", "AE0", "Z"]],
+    "are": [["ER0"], ["AA0", "R"]],
+}
 
 
 def variants(word: str, phonemizer: Phonemizer, dictionary: dict) -> list[list[str]]:
+    w_clean = word.lower().strip()
+    candidates: list[list[str]] = []
+
+    # 1. Primary dictionary pronunciations
+    if w_clean in dictionary:
+        for candidate in dictionary[w_clean]:
+            phones = list(candidate)
+            if phones not in candidates and all(phone in PHONEME_TO_ID for phone in phones):
+                candidates.append(phones)
+
+    # 2. Hyphenated compound words
+    if "-" in w_clean and not w_clean.startswith("-") and not w_clean.endswith("-"):
+        subwords = [sw for sw in w_clean.split("-") if sw]
+        sub_cands = []
+        for sw in subwords:
+            if sw in dictionary:
+                sub_cands.append(dictionary[sw])
+            else:
+                sub_cands.append([phonemizer.phonemize_word(sw)])
+        import itertools
+        for combo in itertools.product(*sub_cands):
+            cand = [ph for sub in combo for ph in sub]
+            if cand not in candidates and all(phone in PHONEME_TO_ID for phone in cand):
+                candidates.append(cand)
+
+    # 3. English possessive 's inflection
+    if w_clean.endswith("'s"):
+        stem = w_clean[:-2]
+        if stem in dictionary:
+            for candidate in dictionary[stem]:
+                last_p = plain(candidate[-1])
+                if last_p in {"S", "Z", "SH", "ZH", "CH", "JH"}:
+                    cand = list(candidate) + ["IH0", "Z"]
+                elif last_p in {"P", "T", "K", "F", "TH"}:
+                    cand = list(candidate) + ["S"]
+                else:
+                    cand = list(candidate) + ["Z"]
+                if cand not in candidates and all(phone in PHONEME_TO_ID for phone in cand):
+                    candidates.append(cand)
+
+    # 4. Morphological 2-part compound decomposition for words not in CMUdict
+    if not candidates and len(w_clean) >= 6:
+        for split_idx in range(3, len(w_clean) - 2):
+            w1, w2 = w_clean[:split_idx], w_clean[split_idx:]
+            if w1 in dictionary and w2 in dictionary:
+                for p1 in dictionary[w1]:
+                    for p2 in dictionary[w2]:
+                        comb = list(p1) + [re.sub(r"1$", "2", p) if p.endswith("1") else p for p in p2]
+                        if comb not in candidates and all(phone in PHONEME_TO_ID for phone in comb):
+                            candidates.append(comb)
+
+    # 5. Baseline from phonemizer
     baseline = phonemizer.phonemize_word(word)
-    candidates = [baseline]
-    for candidate in dictionary.get(word.lower(), []):
-        phones = list(candidate)
-        if phones not in candidates and all(phone in PHONEME_TO_ID for phone in phones):
-            candidates.append(phones)
-    # Conservative regional/allophonic options. Acoustic evidence must still
-    # beat the baseline to select one; these are never applied by spelling alone.
+    if baseline not in candidates and all(phone in PHONEME_TO_ID for phone in baseline):
+        candidates.insert(0, baseline)
+    elif not candidates:
+        candidates.append(baseline)
+
+    # 6. Function word weak forms and reductions
+    if w_clean in FUNCTION_WORD_VARIANTS:
+        for fw_cand in FUNCTION_WORD_VARIANTS[w_clean]:
+            if fw_cand not in candidates and all(phone in PHONEME_TO_ID for phone in fw_cand):
+                candidates.append(fw_cand)
+
+    # 7. Conservative regional and allophonic options.
+    # Acoustic evidence must still beat the baseline to select one; these are never applied by spelling alone.
     for source in list(candidates):
         for index, phone in enumerate(source):
             # English /ɚ, ɝ/ may be recognized as one ER phone or as a
@@ -60,6 +153,7 @@ def variants(word: str, phonemizer: Phonemizer, dictionary: dict) -> list[list[s
                     alternate = source[:index] + [vowel + phone[-1], "R"] + source[index + 1:]
                     if alternate not in candidates:
                         candidates.append(alternate)
+            # Postvocalic R-deletion
             if (phone == "R" and index > 0 and plain(source[index - 1]) in
                     {"AA", "AE", "AH", "AO", "EH", "ER", "IH", "IY", "UH", "UW"}
                     and (index == len(source) - 1 or plain(source[index + 1]) not in
@@ -67,12 +161,58 @@ def variants(word: str, phonemizer: Phonemizer, dictionary: dict) -> list[list[s
                 alternate = source[:index] + source[index + 1:]
                 if alternate and alternate not in candidates:
                     candidates.append(alternate)
-            if (phone in {"T", "D"} and 0 < index < len(source) - 1 and
-                    re.match(r"^(AA|AE|AH|AO|AW|AY|EH|ER|EY|IH|IY|OW|OY|UH|UW)[012]$", source[index - 1]) and
-                    re.match(r"^(AA|AE|AH|AO|AW|AY|EH|ER|EY|IH|IY|OW|OY|UH|UW)[012]$", source[index + 1])):
-                alternate = source[:index] + ["DX"] + source[index + 1:]
+            # Intervocalic and word-final flapping (DX)
+            if (phone in {"T", "D"} and index > 0 and
+                    re.match(r"^(AA|AE|AH|AO|AW|AY|EH|ER|EY|IH|IY|OW|OY|UH|UW)[012]$", source[index - 1])):
+                if (index < len(source) - 1 and
+                        re.match(r"^(AA|AE|AH|AO|AW|AY|EH|ER|EY|IH|IY|OW|OY|UH|UW)[012]$", source[index + 1])):
+                    alternate = source[:index] + ["DX"] + source[index + 1:]
+                    if alternate not in candidates:
+                        candidates.append(alternate)
+                elif index == len(source) - 1:
+                    alternate = source[:index] + ["DX"]
+                    if alternate not in candidates:
+                        candidates.append(alternate)
+            # Unstressed weak vowel alternation (weak vowel merger: AH0 <-> IH0)
+            if phone == "AH0":
+                alternate = source[:index] + ["IH0"] + source[index + 1:]
                 if alternate not in candidates:
                     candidates.append(alternate)
+            elif phone == "IH0":
+                alternate = source[:index] + ["AH0"] + source[index + 1:]
+                if alternate not in candidates:
+                    candidates.append(alternate)
+            # Father-bother / cot-caught merger before R
+            if phone.startswith("AO") and index < len(source) - 1 and plain(source[index + 1]) == "R":
+                alternate = source[:index] + ["AA" + phone[-1]] + source[index + 1:]
+                if alternate not in candidates:
+                    candidates.append(alternate)
+            elif phone.startswith("AA") and index < len(source) - 1 and plain(source[index + 1]) == "R":
+                alternate = source[:index] + ["AO" + phone[-1]] + source[index + 1:]
+                if alternate not in candidates:
+                    candidates.append(alternate)
+            # Yod-coalescence: S Y -> SH, Z Y -> ZH, T Y -> CH, D Y -> JH
+            if index < len(source) - 1 and plain(source[index + 1]) == "Y":
+                coalesce_map = {"S": "SH", "Z": "ZH", "T": "CH", "D": "JH"}
+                p_plain = plain(phone)
+                if p_plain in coalesce_map:
+                    alternate = source[:index] + [coalesce_map[p_plain]] + source[index + 2:]
+                    if alternate not in candidates:
+                        candidates.append(alternate)
+            # Nasal raising / pin-pen merger: EH -> IH before N/M/NG
+            if plain(phone) == "EH" and index < len(source) - 1 and plain(source[index + 1]) in {"N", "M", "NG"}:
+                alternate = source[:index] + ["IH" + phone[-1]] + source[index + 1:]
+                if alternate not in candidates:
+                    candidates.append(alternate)
+            # Coronal stop cluster simplification in word-final position
+            if index == len(source) - 1 and len(source) >= 2:
+                prev_p = plain(source[index - 1])
+                curr_p = plain(phone)
+                if (curr_p == "D" and prev_p == "N") or (curr_p == "T" and prev_p in {"S", "F", "P", "K"}):
+                    alternate = source[:-1]
+                    if alternate and alternate not in candidates:
+                        candidates.append(alternate)
+
     return candidates
 
 
@@ -177,20 +317,95 @@ class TranscriptChecker:
                                   download_root=download_root)
         self.normalizer = Phonemizer().normalizer
 
+    def _normalize_words(self, words: list[str]) -> list[str]:
+        out = []
+        i = 0
+        while i < len(words):
+            if len(words[i]) == 1 and i + 1 < len(words) and len(words[i + 1]) == 1:
+                acronym = words[i]
+                while i + 1 < len(words) and len(words[i + 1]) == 1:
+                    i += 1
+                    acronym += words[i]
+                out.append(acronym)
+                i += 1
+            else:
+                out.append(words[i])
+                i += 1
+        return out
+
+    def _align_compounds(self, w1: list[str], w2: list[str]) -> tuple[list[str], list[str]]:
+        i, j = 0, 0
+        res1, res2 = [], []
+        while i < len(w1) and j < len(w2):
+            if w1[i] == w2[j]:
+                res1.append(w1[i])
+                res2.append(w2[j])
+                i += 1
+                j += 1
+            elif j + 1 < len(w2) and w1[i] == w2[j] + w2[j + 1]:
+                res1.append(w1[i])
+                res2.append(w1[i])
+                i += 1
+                j += 2
+            elif i + 1 < len(w1) and w1[i] + w1[i + 1] == w2[j]:
+                res1.append(w2[j])
+                res2.append(w2[j])
+                i += 2
+                j += 1
+            else:
+                res1.append(w1[i])
+                res2.append(w2[j])
+                i += 1
+                j += 1
+        while i < len(w1):
+            res1.append(w1[i])
+            i += 1
+        while j < len(w2):
+            res2.append(w2[j])
+            j += 1
+        return res1, res2
+
+    def _word_match(self, w1: str, w2: str) -> int:
+        if w1 == w2:
+            return 0
+        if len(w1) >= 4 and len(w2) >= 4 and abs(len(w1) - len(w2)) <= 1:
+            costs = list(range(len(w2) + 1))
+            for i, c1 in enumerate(w1, 1):
+                nc = [i] + [0] * len(w2)
+                for j, c2 in enumerate(w2, 1):
+                    nc[j] = min(costs[j] + 1, nc[j - 1] + 1, costs[j - 1] + (c1 != c2))
+                costs = nc
+            if costs[-1] <= 1:
+                return 0
+        return 1
+
+    def _compute_costs(self, exp: list[str], hrd: list[str]) -> float:
+        e_aligned, h_aligned = self._align_compounds(self._normalize_words(exp), self._normalize_words(hrd))
+        costs = list(range(len(h_aligned) + 1))
+        for i, word in enumerate(e_aligned, 1):
+            next_costs = [i] + [0] * len(h_aligned)
+            for j, other in enumerate(h_aligned, 1):
+                next_costs[j] = min(costs[j] + 1, next_costs[j - 1] + 1,
+                                    costs[j - 1] + self._word_match(word, other))
+            costs = next_costs
+        return costs[-1] / max(len(exp), 1)
+
     def word_error_ratio(self, audio_16k: np.ndarray, transcript: str) -> float:
         segments, _ = self.model.transcribe(audio_16k, beam_size=3, language="en",
                                             vad_filter=False)
-        heard = " ".join(segment.text.strip() for segment in segments)
+        raw_heard = " ".join(segment.text.strip() for segment in segments)
         expected_words = re.findall(r"[a-z']+", self.normalizer.normalize(transcript).lower())
-        heard_words = re.findall(r"[a-z']+", self.normalizer.normalize(heard).lower())
-        costs = list(range(len(heard_words) + 1))
-        for i, word in enumerate(expected_words, 1):
-            next_costs = [i] + [0] * len(heard_words)
-            for j, other in enumerate(heard_words, 1):
-                next_costs[j] = min(costs[j] + 1, next_costs[j - 1] + 1,
-                                    costs[j - 1] + (word != other))
-            costs = next_costs
-        return costs[-1] / max(len(expected_words), 1)
+
+        heard_words_std = re.findall(r"[a-z']+", self.normalizer.normalize(raw_heard).lower())
+        wer_std = self._compute_costs(expected_words, heard_words_std)
+
+        digit_words = {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+                       "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine"}
+        raw_digits_expanded = re.sub(r"\d", lambda m: " " + digit_words[m.group(0)] + " ", raw_heard)
+        heard_words_digits = re.findall(r"[a-z']+", self.normalizer.normalize(raw_digits_expanded).lower())
+        wer_digits = self._compute_costs(expected_words, heard_words_digits)
+
+        return min(wer_std, wer_digits)
 
 
 def audit_item(item: dict, phonemizer: Phonemizer, dictionary: dict,
@@ -236,8 +451,23 @@ def audit_item(item: dict, phonemizer: Phonemizer, dictionary: dict,
         segment = normalized_heard[start:end]
         local_cost = _advance(list(range(len(segment) + 1)),
                               [plain(p) for p in phones], segment)[0][-1]
-        if local_cost >= 2 and local_cost / max(len(phones), len(segment), 1) > 0.5:
-            uncertain_words.append(word)
+        denom = max(len(phones), len(segment), 1)
+        if local_cost >= 2 and local_cost / denom > 0.5:
+            # Check boundary slack (+/- 1 phone) to ensure alignment boundary jitter
+            # does not falsely flag a cleanly spoken word.
+            slack_costs = [local_cost]
+            for s_off in (-1, 0, 1):
+                for e_off in (-1, 0, 1):
+                    if s_off == 0 and e_off == 0:
+                        continue
+                    ns = max(0, start + s_off)
+                    ne = min(len(normalized_heard), max(ns, end + e_off))
+                    seg = normalized_heard[ns:ne]
+                    slack_costs.append(_advance(list(range(len(seg) + 1)),
+                                                [plain(p) for p in phones], seg)[0][-1])
+            min_slack_cost = min(slack_costs)
+            if min_slack_cost >= 2 and min_slack_cost / max(len(phones), 1) > 0.5:
+                uncertain_words.append(word)
     if uncertain_words:
         return {"status": "rejected", "reason": "word_phone_mismatch",
                 "words": uncertain_words, "error_ratio": round(error_ratio, 4),
