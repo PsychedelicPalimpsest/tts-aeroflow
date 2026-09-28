@@ -167,7 +167,7 @@ os.environ["OMP_NUM_THREADS"] = "2"
 # If running directly from git or Kaggle dataset
 !git clone https://github.com/your-org/ttx.git /kaggle/working/ttx || echo "Already cloned or present"
 %cd /kaggle/working/ttx
-!pip install -q soundfile "datasets[audio]"
+!pip install -q soundfile scipy "datasets[audio]"
 ```
 
 ---

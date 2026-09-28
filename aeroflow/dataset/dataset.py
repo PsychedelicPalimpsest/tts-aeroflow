@@ -19,6 +19,7 @@ import torch
 from torch.utils.data import Dataset
 
 from aeroflow.frontend.phonemizer import PAD_ID, Phonemizer
+from aeroflow.dataset.audio import resample_mono
 
 
 class HiFiTTSDataset(Dataset):
@@ -102,20 +103,10 @@ class HiFiTTSDataset(Dataset):
     def _load_audio(self, audio_path: str) -> np.ndarray:
         """Loads and normalizes audio to 24 kHz mono float32."""
         data, sr = sf.read(audio_path, dtype="float32")
-        if data.ndim > 1:
-            data = data.mean(axis=-1)
-
-        if sr != self.sample_rate:
-            # Resample if sample rate differs
-            num_target_samples = int(len(data) * self.sample_rate / sr)
-            data = np.interp(
-                np.linspace(0, len(data), num_target_samples, endpoint=False),
-                np.arange(len(data)),
-                data
-            ).astype(np.float32)
+        data = resample_mono(data, sr, self.sample_rate)
 
         # Peak normalization to [-0.95, 0.95]
-        peak = np.abs(data).max()
+        peak = np.abs(data).max() if data.size else 0.0
         if peak > 1e-4:
             data = 0.95 * (data / peak)
 

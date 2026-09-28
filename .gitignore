@@ -57,6 +57,7 @@ temp_*
 temp_kaggle_ckpt/
 logs/
 wandb/
+artifacts/tts_diagnosis/
 
 # Audio files (ignore audio data/outputs except dry-run test artifact)
 *.wav

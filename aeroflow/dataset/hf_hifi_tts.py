@@ -59,6 +59,7 @@ import torch
 from torch.utils.data import Dataset, IterableDataset
 
 from aeroflow.frontend.phonemizer import Phonemizer
+from aeroflow.dataset.audio import resample_mono
 
 HF_REPO_FULL = "MikhailT/hifi-tts"
 HF_REPO_LIGHT = "MikhailT/hifi-tts-light"
@@ -140,20 +141,8 @@ def _resample_mono(
     src_sr: int,
     tgt_sr: int = 24000,
 ) -> np.ndarray:
-    """Resamples mono float32 audio with linear interpolation (matches dataset.py)."""
-    data = np.asarray(waveform, dtype=np.float32)
-    if data.ndim > 1:
-        data = data.mean(axis=-1).astype(np.float32)
-    if src_sr != tgt_sr and len(data) > 0:
-        num_target = int(len(data) * tgt_sr / src_sr)
-        if num_target <= 0:
-            return np.zeros((0,), dtype=np.float32)
-        data = np.interp(
-            np.linspace(0, len(data), num_target, endpoint=False),
-            np.arange(len(data)),
-            data,
-        ).astype(np.float32)
-    return data
+    """Resamples with the same anti-aliasing filter as the local loader."""
+    return resample_mono(waveform, src_sr, tgt_sr)
 
 
 def _audio_array_and_sr(

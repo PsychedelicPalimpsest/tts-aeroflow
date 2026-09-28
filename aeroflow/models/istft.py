@@ -57,6 +57,37 @@ class iSTFTSynthesizer(nn.Module):
         )
         return audio
 
+    @torch.no_grad()
+    def refine_phase(
+        self, S_complex: torch.Tensor, iterations: int = 0,
+        length: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Optional Griffin-Lim refinement initialized with the learned phase.
+
+        Holds the decoder magnitude fixed while projecting phase onto realizable
+        waveforms. This is an inference experiment, not a perceptual guarantee:
+        magnitudes were trained through iSTFT and may themselves be inaccurate.
+        Zero iterations exactly preserves the original synthesis path.
+        """
+        if not isinstance(iterations, int) or isinstance(iterations, bool) or iterations < 0:
+            raise ValueError("iterations must be a non-negative integer")
+        spectrum = S_complex.to(torch.complex64)
+        magnitude = spectrum.abs()
+        audio = self(spectrum, length=length)
+        for _ in range(iterations):
+            projected = torch.stft(
+                audio, n_fft=self.n_fft, hop_length=self.hop_length,
+                win_length=self.n_fft, window=self.window, center=True,
+                pad_mode="reflect" if audio.shape[-1] > self.n_fft // 2 else "constant",
+                normalized=False, onesided=True, return_complex=True,
+            )
+            if projected.shape != spectrum.shape:
+                raise ValueError("length must preserve the input STFT frame count")
+            phase = projected / projected.abs().clamp_min(1e-8)
+            spectrum = magnitude * phase
+            audio = self(spectrum, length=length)
+        return audio
+
 
 class STFTAnalysis(nn.Module):
     """

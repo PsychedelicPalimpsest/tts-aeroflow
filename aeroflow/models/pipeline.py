@@ -242,12 +242,14 @@ class AeroFlowTTS(nn.Module):
     def synthesize(
         self,
         text_or_tokens: Union[str, torch.Tensor],
-        alpha: float = 1.0
+        alpha: float = 1.0,
+        phase_iterations: int = 0,
     ) -> torch.Tensor:
         """
         End-to-end synthesis from raw text string or token tensor to 24 kHz audio.
         text_or_tokens: Input English text string or [1, N] token tensor.
         alpha: Speaking tempo modifier (1.0 = normal tempo, >1.0 slower, <1.0 faster).
+        phase_iterations: Optional phase refinement iterations (0 preserves baseline).
         Returns:
             audio: [N_samples] 24,000 Hz 1D waveform tensor.
         """
@@ -279,6 +281,6 @@ class AeroFlowTTS(nn.Module):
 
         # 6. Complex STFT Decoding & Alias-Free iSTFT Synthesis
         S_complex, _, _, _ = self.decoder(z)  # [1, 513, T]
-        audio = self.istft(S_complex)          # [1, N_samples]
+        audio = self.istft.refine_phase(S_complex, iterations=phase_iterations)
 
         return audio.squeeze(0)  # [N_samples] @ 24 kHz

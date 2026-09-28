@@ -294,23 +294,22 @@ class InstantaneousFrequencyLoss(nn.Module):
             audio_mask = audio_mask[..., :min_len]
             valid_audio = audio_mask.float().sum(dim=-1)
             valid_frames = (1 + valid_audio.long() // self.hop_length).clamp(max=S.shape[-1])
-            valid_diff = (valid_frames - 1).clamp(min=1, max=T_diff)
+            valid_diff = (valid_frames - 1).clamp(min=0, max=T_diff)
             f_idx = torch.arange(T_diff, device=y.device).unsqueeze(0).expand(y.shape[0], -1)
             frame_mask = (f_idx < valid_diff.unsqueeze(1)).unsqueeze(1).to(phase_dist.dtype)
 
-        # Weight by magnitude to focus on voiced speech harmonics
-        mag_weight = torch.sqrt(
-            _safe_complex_abs(S[:, :, 1:]) * _safe_complex_abs(S_hat[:, :, 1:]) + 1e-5
-        )
+        # Phase is meaningful only when both reference frames have energy.
+        # Target-only weights prevent the model reducing this loss by moving
+        # predicted energy away from bins with incorrect phase. Exact silence
+        # has zero weight, rather than a fabricated positive energy floor.
+        mag_weight = torch.sqrt(diff_t.detach().abs())
         if frame_mask is not None:
             mag_weight = mag_weight * frame_mask
-        mag_norm = mag_weight / (mag_weight.mean(dim=(-2, -1), keepdim=True) + 1e-5)
-
-        weighted_loss = phase_dist * mag_norm
-        if frame_mask is not None:
-            weighted_loss = weighted_loss * frame_mask
-            return weighted_loss.sum() / (frame_mask.sum() * weighted_loss.shape[1] + 1e-5)
-        return weighted_loss.mean()
+        # Normalize once, independently per utterance. Padding must not change
+        # an utterance's contribution to the loss.
+        weighted_sum = (phase_dist * mag_weight).sum(dim=(-2, -1))
+        weight_sum = mag_weight.sum(dim=(-2, -1))
+        return (weighted_sum / weight_sum.clamp_min(1e-5)).mean()
 
 
 class AeroFlowLoss(nn.Module):
