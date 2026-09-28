@@ -39,6 +39,12 @@ from aeroflow.dataset.dataset import (
     collate_hifi_tts,
     create_synthetic_batch
 )
+from aeroflow.dataset.ljspeech import (
+    LJSPEECH_AUDIO_SUBDIRS,
+    LJSPEECH_METADATA_NAME,
+    LJSpeechDataset,
+    parse_ljspeech_row,
+)
 from aeroflow.dataset.hf_hifi_tts import (
     HF_REPO_FULL,
     HF_REPO_LIGHT,
@@ -77,6 +83,10 @@ __all__ = [
     "MultiResolutionSTFTLoss",
     "InstantaneousFrequencyLoss",
     "HiFiTTSDataset",
+    "LJSpeechDataset",
+    "LJSPEECH_METADATA_NAME",
+    "LJSPEECH_AUDIO_SUBDIRS",
+    "parse_ljspeech_row",
     "HuggingFaceHiFiTTSDataset",
     "StreamingHiFiTTSDataset",
     "create_hifi_tts_dataset",

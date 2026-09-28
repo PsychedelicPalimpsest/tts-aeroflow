@@ -54,6 +54,7 @@ from aeroflow import (
     AeroFlowLoss,
     HiFiTTSDataset,
     HuggingFaceHiFiTTSDataset,
+    LJSpeechDataset,
     StreamingHiFiTTSDataset,
     collate_hifi_tts,
     create_synthetic_batch,
@@ -419,11 +420,25 @@ def train():
     parser.add_argument("--manifest-path", type=str, default=None, help="Path to Hi-Fi TTS JSON manifest")
     parser.add_argument("--audio-dir", type=str, default=None, help="Directory containing audio files")
     parser.add_argument("--dataset-source", type=str, default="auto",
-                        choices=["auto", "manifest", "hf", "hf-streaming", "synthetic"],
-                        help="Dataset backend: 'manifest' (local JSON), 'hf' (lazy map over "
+                        choices=["auto", "manifest", "ljspeech", "hf", "hf-streaming", "synthetic"],
+                        help="Dataset backend: 'manifest' (local JSON), 'ljspeech' (local "
+                             "metadata.csv + audio/ or wavs/), 'hf' (lazy map over "
                              "MikhailT/hifi-tts, Arrow memory-mapped, one-row RAM), "
                              "'hf-streaming' (streaming=True, no local copy, O(1) RAM), "
-                             "'synthetic' (fallback), or 'auto' (manifest if found else synthetic)")
+                             "'synthetic' (fallback), or 'auto' (manifest/ljspeech if "
+                             "found else synthetic)")
+    parser.add_argument("--ljspeech-root", type=str, default=None,
+                        help="LJSpeech dataset root holding metadata.csv and audio/ or wavs/ "
+                             "(e.g. /data/LJSpeech-1.1). May also point at metadata.csv itself.")
+    parser.add_argument("--ljspeech-metadata", type=str, default=None,
+                        help="Explicit LJSpeech metadata.csv path (default: <root>/metadata.csv).")
+    parser.add_argument("--ljspeech-audio-dir", type=str, default=None,
+                        help="Explicit LJSpeech wav dir (default: first existing <root>/audio, <root>/wavs, <root>).")
+    parser.add_argument("--ljspeech-use-raw", action="store_true", default=False,
+                        help="Use the raw (2nd) transcript column instead of normalized (3rd).")
+    parser.add_argument("--ljspeech-min-duration", type=float, default=0.5)
+    parser.add_argument("--ljspeech-max-duration", type=float, default=12.0,
+                        help="Max LJSpeech clip duration in seconds (bounds peak MR-STFT memory).")
     parser.add_argument("--hf-repo-id", type=str, default="MikhailT/hifi-tts",
                         help="HF repo for --dataset-source hf/hf-streaming "
                              "(use MikhailT/hifi-tts-light for small-format testing)")
@@ -495,9 +510,24 @@ def train():
 
     # 2. Dataset & DataLoader (4-vCPU balanced: 2 workers per GPU process)
     # Backends share the same collate format so this is a pure switch-out.
+    def _ljspeech_detected() -> bool:
+        for cand in (args.ljspeech_metadata, args.ljspeech_root):
+            if cand and os.path.exists(cand):
+                return True
+        if args.ljspeech_root:
+            for name in ("metadata.csv", "audio", "wavs"):
+                if os.path.exists(os.path.join(args.ljspeech_root, name)):
+                    return True
+        return False
+
     source = args.dataset_source
     if source == "auto":
-        source = "manifest" if (args.manifest_path and os.path.exists(args.manifest_path)) else "synthetic"
+        if args.manifest_path and os.path.exists(args.manifest_path):
+            source = "manifest"
+        elif _ljspeech_detected():
+            source = "ljspeech"
+        else:
+            source = "synthetic"
 
     is_streaming = False
     if source == "manifest":
@@ -518,6 +548,23 @@ def train():
                 sample_rate=24000,
                 hop_length=240
             )
+    elif source == "ljspeech":
+        if is_master:
+            print(f"[Dataset] Loading LJSpeech: root={args.ljspeech_root} "
+                  f"metadata={args.ljspeech_metadata} audio_dir={args.ljspeech_audio_dir or args.audio_dir}")
+        dataset = LJSpeechDataset(
+            root=args.ljspeech_root,
+            metadata_path=args.ljspeech_metadata,
+            audio_dir=args.ljspeech_audio_dir or args.audio_dir,
+            sample_rate=24000,
+            hop_length=240,
+            min_duration_s=args.ljspeech_min_duration,
+            max_duration_s=args.ljspeech_max_duration,
+            use_normalized=not args.ljspeech_use_raw,
+        )
+        if is_master:
+            print(f"[Dataset] LJSpeech ready ({len(dataset)} rows, "
+                  f"normalized={'off (raw)' if args.ljspeech_use_raw else 'on'}).")
     elif source in ("hf", "hf-streaming"):
         speaker_arg = (args.hf_speaker or "").strip().lower()
         speaker_ids = None if speaker_arg in ("", "all", "none") else [s.strip() for s in args.hf_speaker.split(",")]

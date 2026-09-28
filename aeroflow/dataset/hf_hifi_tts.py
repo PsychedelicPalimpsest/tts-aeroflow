@@ -568,9 +568,12 @@ def create_hifi_tts_dataset(
 
     Args:
         source: ``"manifest"`` -> legacy local :class:`HiFiTTSDataset`
-            (pass ``manifest_path``/``audio_dir``); ``"hf"`` (default) ->
-            lazy map-style :class:`HuggingFaceHiFiTTSDataset` over
-            ``MikhailT/hifi-tts``; ``"hf-streaming"``/``"streaming"`` ->
+            (pass ``manifest_path``/``audio_dir``); ``"ljspeech"`` ->
+            local :class:`LJSpeechDataset` over ``metadata.csv`` + wav dir
+            (pass ``root``/``metadata_path``/``audio_dir``);
+            ``"hf"`` (default) -> lazy map-style
+            :class:`HuggingFaceHiFiTTSDataset` over ``MikhailT/hifi-tts``;
+            ``"hf-streaming"``/``"streaming"`` ->
             :class:`StreamingHiFiTTSDataset` (no local copy, O(1) RAM).
         **kwargs: forwarded to the selected class.
 
@@ -579,6 +582,7 @@ def create_hifi_tts_dataset(
         >>> light = create_hifi_tts_dataset("hf", repo_id=HF_REPO_LIGHT)
         >>> stream = create_hifi_tts_dataset("hf-streaming")
         >>> local = create_hifi_tts_dataset("manifest", manifest_path="m.json")
+        >>> lj = create_hifi_tts_dataset("ljspeech", root="/data/LJSpeech-1.1")
     """
     normalized = source.lower().replace("_", "-")
     if normalized in ("manifest", "local", "disk"):
@@ -592,11 +596,24 @@ def create_hifi_tts_dataset(
             max_duration_s=kwargs.pop("max_duration_s", 12.0),
             min_duration_s=kwargs.pop("min_duration_s", 0.5),
         )
+    if normalized in ("ljspeech", "lj-speech", "lj"):
+        from aeroflow.dataset.ljspeech import LJSpeechDataset
+
+        return LJSpeechDataset(
+            root=kwargs.pop("root", None),
+            metadata_path=kwargs.pop("metadata_path", kwargs.pop("manifest_path", None)),
+            audio_dir=kwargs.pop("audio_dir", None),
+            sample_rate=kwargs.pop("sample_rate", 24000),
+            hop_length=kwargs.pop("hop_length", 240),
+            min_duration_s=kwargs.pop("min_duration_s", 0.5),
+            max_duration_s=kwargs.pop("max_duration_s", 12.0),
+            use_normalized=kwargs.pop("use_normalized", True),
+        )
     if normalized in ("hf", "hf-map", "map"):
         return HuggingFaceHiFiTTSDataset(**kwargs)
     if normalized in ("hf-streaming", "streaming", "iterable"):
         return StreamingHiFiTTSDataset(**kwargs)
     raise ValueError(
         f"Unknown dataset source {source!r}. "
-        "Expected 'manifest', 'hf', or 'hf-streaming'."
+        "Expected 'manifest', 'ljspeech', 'hf', or 'hf-streaming'."
     )

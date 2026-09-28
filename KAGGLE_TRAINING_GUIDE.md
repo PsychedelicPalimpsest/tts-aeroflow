@@ -53,6 +53,43 @@ Expected directory structure:
       └── ...
 ```
 
+### Option A2: LJSpeech Dataset (`metadata.csv` + `audio/` or `wavs/`)
+Upload or attach an LJSpeech-1.1-style dataset (Kaggle mounts it at
+`/kaggle/input/<slug>/`). No manifest conversion needed —
+`--dataset-source ljspeech` reads `metadata.csv` directly:
+
+```
+<ljspeech-root>/
+  ├── metadata.csv          # ID|raw transcript|normalized transcript per line
+  └── audio/                # or wavs/ (classic LJSpeech-1.1), 22050 Hz wav
+      ├── LJ001-0001.wav
+      ├── LJ001-0002.wav
+      └── ...
+```
+
+```bash
+torchrun --nproc_per_node=2 scripts/train_kaggle.py \
+    --dataset-source ljspeech \
+    --ljspeech-root "/kaggle/input/ljspeech-1-1" \
+    --checkpoint-dir "/kaggle/working/checkpoints" \
+    --batch-size 16 --epochs 100 --max-hours 11.2 --auto-resume
+```
+
+Notes:
+- `--ljspeech-root` may point at the dataset dir or at `metadata.csv` itself.
+  Override the wav dir with `--ljspeech-audio-dir`, the csv path with
+  `--ljspeech-metadata`.
+- Uses the normalized (3rd) transcript column by default; pass
+  `--ljspeech-use-raw` for the raw (2nd) column.
+- 22.05 kHz → 24 kHz resampling, mono mix, 0.95 peak-norm, and
+  `--ljspeech-min/max-duration` filtering (defaults 0.5/12.0 s) are automatic.
+  Length-bucketed batching works unchanged.
+- `--dataset-source auto` picks this up when `--ljspeech-root/metadata`
+  exists. For voice transfer from a Speaker 9017 checkpoint, add `--finetune
+  --lr 5e-5` (see Option D).
+- Python API: `from aeroflow import LJSpeechDataset`;
+  `LJSpeechDataset(root=...)`, `create_hifi_tts_dataset("ljspeech", root=...)`.
+
 ### Option B: HuggingFace Dataset (no manual download, lazy 40 GB-safe)
 `train_kaggle.py --dataset-source hf` streams directly from `MikhailT/hifi-tts`
 without ever holding the 40 GB corpus in RAM (Arrow memory-mapped, one row
