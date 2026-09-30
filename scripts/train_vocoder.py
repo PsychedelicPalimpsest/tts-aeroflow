@@ -136,7 +136,7 @@ def parser():
     p.add_argument("--cache-dir")
     p.add_argument("--checkpoint", type=Path, help="Original AeroFlow checkpoint; required for a new run")
     p.add_argument("--resume", type=Path, help="Resume this trainer's checkpoint_latest.pt")
-    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--output", type=Path, help="Output directory; defaults to the resume checkpoint's directory")
     p.add_argument("--steps", type=int, default=100000, help="Total update count, including resumed steps")
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--crop-samples", type=int, default=16320)
@@ -158,11 +158,19 @@ def parser():
     return p
 
 
+def resolve_output(p, args):
+    if args.output is None:
+        if args.resume is None:
+            p.error("--output is required for a new run")
+        args.output = args.resume.parent
+
+
 def main(argv=None):
     p = parser()
     args = p.parse_args(argv)
     if bool(args.checkpoint) == bool(args.resume):
         p.error("Supply exactly one of --checkpoint or --resume")
+    resolve_output(p, args)
     for key in ("steps", "batch_size", "disc_channels", "validation_items", "validate_every", "save_every", "threads"):
         if getattr(args, key) < 1:
             p.error(f"--{key.replace('_', '-')} must be positive")

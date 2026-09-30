@@ -105,6 +105,10 @@ python scripts/train_vocoder.py \
   --steps 100000 --batch-size 8
 ```
 
+When resuming in place, `--output` can be omitted; it defaults to the directory
+containing the `--resume` checkpoint. Set `--output` explicitly when writing to a
+different directory, such as a writable Kaggle working directory.
+
 `--steps` is the total number of updates, including previous sessions. For a run
 started with non-default settings, repeat those settings when resuming. Sampling
 and crop positions are derived from seed and step, so worker prefetch cannot

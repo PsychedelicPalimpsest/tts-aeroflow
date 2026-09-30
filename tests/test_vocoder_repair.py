@@ -2,11 +2,32 @@
 
 import torch
 import torch.nn.functional as F
+import pytest
 
 from aeroflow.models.pipeline import AeroFlowTTS
 from aeroflow.models.discriminators import VocoderDiscriminators
 from aeroflow.losses.vocoder import MelReconstructionLoss, discriminator_loss, generator_losses
-from scripts.train_vocoder import paired_crops, split_indices, StepBatches
+from scripts.train_vocoder import paired_crops, split_indices, StepBatches, parser, resolve_output
+
+
+def test_vocoder_output_defaults_to_resume_checkpoint_directory(tmp_path):
+    checkpoint = tmp_path / "run" / "checkpoint_latest.pt"
+    args = parser().parse_args(["--dataset", "lj", "--resume", str(checkpoint)])
+    resolve_output(parser(), args)
+    assert args.output == checkpoint.parent
+
+    other_output = tmp_path / "new_run"
+    args = parser().parse_args(["--dataset", "lj", "--resume", str(checkpoint),
+                                "--output", str(other_output)])
+    resolve_output(parser(), args)
+    assert args.output == other_output
+
+
+def test_new_vocoder_run_requires_output(tmp_path, capsys):
+    args = parser().parse_args(["--dataset", "lj", "--checkpoint", str(tmp_path / "source.pt")])
+    with pytest.raises(SystemExit, match="2"):
+        resolve_output(parser(), args)
+    assert "--output is required for a new run" in capsys.readouterr().err
 
 
 def test_recording_reconstruction_is_independent_of_batch_padding():
