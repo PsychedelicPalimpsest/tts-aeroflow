@@ -1,6 +1,7 @@
 """
-AeroFlow-v2 Convex Spectral Regression Loss Suite.
-Eliminates adversarial GAN instability with 100% convex spectral losses:
+Legacy AeroFlow spectral regression losses for joint text/flow training.
+These objectives are not convex in network parameters and do not guarantee
+natural waveform quality. See vocoder.py for perceptual decoder training.
 1. Optimal Transport Conditional Flow Matching (CFM) Loss (L_cfm)
 2. Monotonic Duration L1 Regression Loss (L_dur)
 3. Text-to-Latent Prior Alignment Loss (L_prior)

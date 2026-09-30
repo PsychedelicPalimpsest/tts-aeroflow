@@ -1,385 +1,362 @@
-# AeroFlow-v2: Kaggle 2x NVIDIA T4 Distributed Training Guide
+# Train new AeroFlow voices on Kaggle
 
-This guide provides step-by-step instructions, operational parameters, and ready-to-execute notebook cells for training **AeroFlow-v2** on **Kaggle's 2x Tesla T4 (16GB each) GPU environment**.
+This guide covers **two independent models**: LJSpeech and HiFi speaker **9017**.
+Start each from random weights, use its complete corpus, and keep its checkpoints
+in separate directories. You do not need the previously trained Downloads files.
 
----
+The implemented workflow has two stages:
 
-## 1. Executive Hardware & Architecture Summary
+| Stage | Command | What learns | Starting weights |
+|---|---|---|---|
+| A: Joint TTS training | `scripts/train_kaggle.py` | Text, durations, acoustic encoder, flow, decoder | Random for a new model |
+| B: Acoustic decoder training | `scripts/train_vocoder.py` | Decoder and training-only discriminators | Stage A checkpoint for that voice |
 
-| Parameter | Kaggle Specification | AeroFlow-v2 Configuration |
-| :--- | :--- | :--- |
-| **Accelerators** | 2x NVIDIA Tesla T4 (16GB VRAM each) | PyTorch DistributedDataParallel (DDP) via `torchrun --nproc_per_node=2` |
-| **Interconnect** | PCIe Gen3 x16 (No NVLink / No P2P) | `NCCL_P2P_DISABLE=1`, `NCCL_IB_DISABLE=1` |
-| **Host CPU** | 4 vCPUs (Intel Xeon @ 2.20 GHz) | `OMP_NUM_THREADS=2` per GPU process; 2 DataLoader workers per GPU |
-| **Precision** | Turing Tensor Cores | FP16 Mixed Precision via `torch.amp.GradScaler('cuda')` with FP32 losses |
-| **Session Budget** | 12.0 Hours Maximum | 11.2-Hour Wall-Clock Watchdog with automated graceful exit code 0 |
-| **Batch Size** | 16 per GPU (32 effective) | ~1.5s - 8.0s variable speech clips per batch item |
-| **Audio Target** | Hi-Fi TTS Speaker 9017 (John Van Stan) | 24,000 Hz mono PCM, 100 Hz frame rate ($N_{\text{fft}}=1024, H=240$) |
+Stage A still uses the legacy spectral reconstruction objective alongside text
+and flow losses. Stage B addresses its suspected contribution to robotic timbre
+using mel, adversarial and feature-matching losses. It freezes the encoder and
+flow so their learned latent representation stays compatible. The vocoder trainer
+cannot train a complete TTS model from random weights on its own.
 
----
+The padding defect has been fixed in both paths. These changes have passed local
+CPU tests and short real-audio training checks; full-corpus GPU convergence and
+perceptual improvement have not yet been established. Epoch/step budgets below
+are starting points, not guarantees of natural speech. See
+[VOCODER_REPAIR.md](VOCODER_REPAIR.md) for the objective and diagnostic results.
 
-## 2. Critical Operational Requirements for Kaggle
+## 1. Prepare the notebook and storage
 
-### 2.1 PCIe P2P Disabling (`NCCL_P2P_DISABLE=1`)
-> [!IMPORTANT]
-> Kaggle's dual T4 instances are connected over standard virtualized PCIe busses that **do not support peer-to-peer (P2P) memory copies**. If NCCL attempts to use P2P, the process group will experience an irreversible CUDA kernel stall or crash with `NCCL WARN: Call to connect returned Connection refused`. 
-> AeroFlow enforces `os.environ["NCCL_P2P_DISABLE"] = "1"` and `os.environ["NCCL_IB_DISABLE"] = "1"` at initialization.
+Enable a GPU accelerator. Enable Internet if loading from Hugging Face. Check
+actual GPU availability, free disk space and the session limit shown by Kaggle;
+do not assume a fixed hardware allocation, storage quota or runtime allowance.
 
-### 2.2 CPU Thread Allocation (`OMP_NUM_THREADS=2`)
-Kaggle allocates 4 vCPUs per notebook. Running standard OpenMP thread pooling will spawn 4 threads per process, leading to 8 CPU threads fighting over 4 vCPUs. AeroFlow pins `OMP_NUM_THREADS=2` and configures `num_workers=2, persistent_workers=True, prefetch_factor=2` per GPU, keeping CPU utilization at 100% without context switching thrash.
+Use **one GPU per training process** for this guide. Stage B has no DDP support;
+do not launch it with `torchrun`. Stage A contains a distributed path, but its
+multi-GPU behavior was not validated by the local checks. The commands below
+select GPU 0 explicitly and work without relying on that path.
 
-### 2.3 11.2-Hour Wall-Clock Watchdog & Session Chaining
-Kaggle strictly terminates notebooks after 12.0 hours. To prevent abrupt SIGKILL during an active backward pass, `scripts/train_kaggle.py` contains a wall-clock watchdog:
-- When elapsed time reaches **11.2 hours (40,320 seconds)**, the master process automatically saves `checkpoint_latest.pt` atomically using `temp_path` $\to$ `os.replace`.
-- Both processes synchronize via `dist.barrier()` and exit with **code 0**.
-- In the next Kaggle session, attach the saved output dataset from the previous run; `train_kaggle.py` automatically detects `/kaggle/input/**/checkpoint_latest.pt` and seamlessly resumes training from `global_step + 1` with exact optimizer momentum and RNG states.
+In a notebook Python cell:
 
----
-
-## 3. Dataset Setup on Kaggle
-
-### Optional: audit pronunciations before training
-
-The offline audit listens to each clip with an ARPAbet CTC phone recognizer,
-compares it with the project's phonemizer and CMUdict alternatives, and writes
-an accepted/rejected JSONL decision. It also tries conservative postvocalic
-`R` deletion and intervocalic `T`/`D` flapping. An accepted decision contains
-the exact phoneme sequence used by the trainer. Rejected clips are absent from
-the training index. This does **not** identify every accent feature or prove
-that every accepted transcript is correct. Inspect the `changes`, `heard`, and
-`reason` fields and tune the error threshold on a small sample before auditing
-the full corpus.
-
-Run the audit in a separate Kaggle session from training. Install the extra
-packages and save its JSONL output as a Kaggle dataset, so you can attach it
-to every later training session:
-
-```bash
-pip install -q cmudict transformers faster-whisper
-python scripts/audit_pronunciations.py \
-    --source hf-streaming --hf-speaker 9017 --limit 200 \
-    --output /kaggle/working/pronunciation_sample.jsonl \
-    --lexicon-output /kaggle/working/pronunciation_lexicon.json
-```
-
-After reviewing that sample, omit `--limit` and save the full output as
-`pronunciations.jsonl`. The default recognizer is
-[`huper29/huper_recognizer`](https://huggingface.co/huper29/huper_recognizer),
-which requires a one-time model download. The audit reads one clip at a time
-and uses one GPU. For a local manifest, use `--source manifest
---manifest-path /kaggle/input/.../manifest.json --audio-dir /kaggle/input/.../audio`.
-For LJSpeech, use `--source ljspeech --ljspeech-root /kaggle/input/...`.
-The audit only reads audio; its output stores IDs and phoneme labels.
-For a corpus that exceeds one session, pass `--new-items 50000` and continue
-in another session with `--resume-from /kaggle/input/<previous-audit>/pronunciations.jsonl`
-and a new `--output` path. The new file copies prior decisions and adds more.
-
-Train on the same dataset source, speaker, split, and transcripts used by the
-audit, adding this flag to the usual `torchrun` command:
-
-```bash
-    --pronunciation-manifest /kaggle/input/<audit-dataset>/pronunciations.jsonl
-```
-
-The default `--max-error-ratio 0.15` accepts strong phone matches directly.
-Clips with phone error up to `--rescue-max-error-ratio 0.20` are accepted only
-when a separate Faster-Whisper `base.en` transcript check has word error at
-most `--max-asr-wer 0.10`. That model runs on CPU by default and adds one-time
-preprocessing time. Set `--asr-model none` to use phone matching alone. These
-thresholds are starting points, not calibrated quality guarantees. A phone
-recognizer can mistake a regional sound for a standard phone; a matching
-Whisper transcript supports the words but does not prove the phonemes. Review
-both accepted and rejected clips before using the decisions for a full run.
-The optional lexicon file records a changed word only after at least three
-accepted examples agree on the same pronunciation in at least 80% of that
-word's accepted occurrences. Pass it to inference with
-`python -m aeroflow "Text." --pronunciation-lexicon /path/to/pronunciation_lexicon.json`.
-
-### Option A: Hi-Fi TTS Speaker 9017 Dataset
-1. In the Kaggle notebook sidebar, click **Add Input** $\to$ **Datasets**.
-2. Search for `hifi-tts` or upload the Speaker 9017 subset (`9017_manifest.json` and `audio/`).
-3. Kaggle mounts the dataset at `/kaggle/input/hifi-tts-speaker-9017/`.
-
-Expected directory structure:
-```
-/kaggle/input/hifi-tts-speaker-9017/
-  ├── manifest.json
-  └── audio/
-      ├── 9017_0001.wav
-      ├── 9017_0002.wav
-      └── ...
-```
-
-### Option A2: LJSpeech Dataset (`metadata.csv` + `audio/` or `wavs/`)
-Upload or attach an LJSpeech-1.1-style dataset (Kaggle mounts it at
-`/kaggle/input/<slug>/`). No manifest conversion needed —
-`--dataset-source ljspeech` reads `metadata.csv` directly:
-
-```
-<ljspeech-root>/
-  ├── metadata.csv          # ID|raw transcript|normalized transcript per line
-  └── audio/                # or wavs/ (classic LJSpeech-1.1), 22050 Hz wav
-      ├── LJ001-0001.wav
-      ├── LJ001-0002.wav
-      └── ...
-```
-
-```bash
-torchrun --nproc_per_node=2 scripts/train_kaggle.py \
-    --dataset-source ljspeech \
-    --ljspeech-root "/kaggle/input/ljspeech-1-1" \
-    --checkpoint-dir "/kaggle/working/checkpoints" \
-    --batch-size 16 --epochs 100 --max-hours 11.2 --auto-resume
-```
-
-Notes:
-- `--ljspeech-root` may point at the dataset dir or at `metadata.csv` itself.
-  Override the wav dir with `--ljspeech-audio-dir`, the csv path with
-  `--ljspeech-metadata`.
-- Uses the normalized (3rd) transcript column by default; pass
-  `--ljspeech-use-raw` for the raw (2nd) column.
-- 22.05 kHz → 24 kHz resampling, mono mix, 0.95 peak-norm, and
-  `--ljspeech-min/max-duration` filtering (defaults 0.5/12.0 s) are automatic.
-  Length-bucketed batching works unchanged.
-- `--dataset-source auto` picks this up when `--ljspeech-root/metadata`
-  exists. For voice transfer from a Speaker 9017 checkpoint, add `--finetune
-  --lr 5e-5` (see Option D).
-- Python API: `from aeroflow import LJSpeechDataset`;
-  `LJSpeechDataset(root=...)`, `create_hifi_tts_dataset("ljspeech", root=...)`.
-
-### Option B: HuggingFace Dataset (no manual download, lazy 40 GB-safe)
-`train_kaggle.py --dataset-source hf` streams directly from `MikhailT/hifi-tts`
-without ever holding the 40 GB corpus in RAM (Arrow memory-mapped, one row
-decoded per `__getitem__`); `--dataset-source hf-streaming` goes further with
-`streaming=True` (no local copy, O(1) RAM). For format testing use the small
-same-format repo `MikhailT/hifi-tts-light`:
-```bash
-torchrun --nproc_per_node=2 scripts/train_kaggle.py \
-    --dataset-source hf-streaming \
-    --hf-repo-id MikhailT/hifi-tts \
-    --hf-subset clean --hf-split train --hf-speaker 9017 \
-    --steps-per-epoch 1000 \
-    --checkpoint-dir "/kaggle/working/checkpoints" \
-    --batch-size 16 --epochs 100 --max-hours 11.2 --auto-resume
-```
-Requires `pip install -q "datasets[audio]"` (see Cell 2). Subsets: `clean` /
-`other` with splits `train`/`test`/`dev`, or subset `all` with splits
-`train.clean`, `train.other`, `test.clean`, `test.other`, `dev.clean`,
-`dev.other`. `--hf-speaker all` keeps every speaker. Streaming datasets have no length,
-so each epoch is capped at `--steps-per-epoch` (default 1000, also the cosine
-scheduler period); `--hf-shuffle-buffer N` enables a reshuffled stream buffer
-(0 = in-order).
-
-### Option B2: Maximizing GPU utilization (fix for starved GPUs)
-If `nvidia-smi`/Kaggle metrics show low GPU% with CPU pinned, the data
-pipeline is the bottleneck:
-1. **Prefer `--dataset-source hf` over `hf-streaming`.** Streaming pulls every
-   parquet row-group over HTTP (each worker re-traverses the data, and
-   unauthenticated Hub requests are rate-limited). The one-time ~40 GB
-   download to `/kaggle/tmp/hf_cache` pays for itself immediately; after that
-   workers feed from local disk.
-2. **Raise `--batch-size`.** 6 GB / 15 GB VRAM means headroom: try 24–32 per
-   GPU and watch GPU memory.
-3. **Set an `HF_TOKEN`.** Kaggle Secrets → environment variable `HF_TOKEN`
-   lifts Hub rate limits (faster one-time download and streaming alike). The
-   `datasets` library picks it up automatically, no flag needed.
-4. **Tune `--num-workers` / `--prefetch-factor`.** Defaults (2 workers/GPU,
-   prefetch 2) match the 4-vCPU host; with slow storage try
-   `--prefetch-factor 4` to deepen the queue.
-5. **Leave `--bucket-batches` on (default).** Similar-length clips share a
-   batch, so padding waste collapses (measured x1.01 vs x1.35 random on
-   1–2 s clips; far bigger on 0.5–12 s speech) and step times stop swinging
-   with batch composition. Disable with `--no-bucket-batches`.
-
-> [!IMPORTANT]
-> **Storage layout:** `/kaggle/working` is only ~20 GB but the full corpus
-> cache is ~40 GB. `train_kaggle.py` therefore creates `/kaggle/tmp` scratch
-> at startup and routes the HF cache there (`/kaggle/tmp/hf_cache` by default;
-> override with `--hf-cache-dir`). Checkpoints stay in
-> `/kaggle/working/checkpoints` so they persist as session output, while
-> `/kaggle/tmp` is ephemeral — each new session re-downloads the cache, then
-> auto-resumes from the attached prior checkpoint. If even scratch space is
-> tight, prefer `--dataset-source hf-streaming` (no local copy at all).
-
-### Option C: Synthetic Dataset Verification (No Dataset Required)
-If no external dataset is mounted, omitting `--manifest-path` automatically triggers the built-in `SyntheticHiFiTTSDataset` which generates synthetic 24 kHz baritone audio matching Speaker 9017 acoustic characteristics for immediate dry-run and stress verification.
-
-### Option D: Voice Transfer / Fine-Tuning a New Speaker (`--finetune`, `--reset-lr`)
-When adapting an existing checkpoint to a new voice (e.g. switching speaker ID from 9017 to 6097 or loading a custom manifest), use `--finetune`:
-- Loads pretrained Conformer, ODE Vector Field, and Complex STFT Decoder weights.
-- Resets `global_step = 0`, `epoch = 0`, and `best_loss = inf`.
-- Flushes stale AdamW momentum buffers from the previous speaker.
-- Restarts the Cosine scheduler cleanly from step 0 with the fine-tuning `--lr` (recommended: `5e-5`).
-
-```bash
-torchrun --nproc_per_node=2 scripts/train_kaggle.py \
-    --dataset-source hf-streaming \
-    --hf-repo-id MikhailT/hifi-tts \
-    --hf-subset clean --hf-split train --hf-speaker 6097 \
-    --resume-path "/kaggle/input/aeroflow-checkpoints/checkpoint_latest.pt" \
-    --finetune \
-    --lr 5e-5 \
-    --epochs 30 --max-hours 11.2
-```
-
-To simply reset the learning rate without resetting the step/epoch counters, use `--reset-lr`:
-```bash
-torchrun --nproc_per_node=2 scripts/train_kaggle.py \
-    --resume-path "/kaggle/working/checkpoints/checkpoint_latest.pt" \
-    --reset-lr \
-    --lr 1e-4
-```
-
-
----
-
-## 4. Complete Kaggle Notebook Execution Cells
-
-### Cell 1: Environment & GPU Hardware Verification
 ```python
-# Verify 2x Tesla T4 GPUs and check environment variables
 import os
+import shutil
 import torch
 
-print(f"PyTorch Version: {torch.__version__}")
-print(f"CUDA Available:  {torch.cuda.is_available()}")
-print(f"Device Count:    {torch.cuda.device_count()}")
-
+assert torch.cuda.is_available(), "Enable a GPU accelerator before training"
+print(torch.__version__)
 for i in range(torch.cuda.device_count()):
-    print(f"GPU {i}: {torch.cuda.get_device_name(i)} ({torch.cuda.get_device_properties(i).total_memory / (1024**3):.1f} GB)")
+    print(i, torch.cuda.get_device_name(i))
 
-# Set Kaggle multi-GPU NCCL configuration
-os.environ["NCCL_P2P_DISABLE"] = "1"
-os.environ["NCCL_IB_DISABLE"] = "1"
-os.environ["OMP_NUM_THREADS"] = "2"
+# Set BEFORE importing datasets/aeroflow or starting either trainer.
+# These are cache locations, not a promise of additional disk capacity.
+os.makedirs('/kaggle/tmp', exist_ok=True)
+os.environ['HF_HOME'] = '/kaggle/tmp/hf_home'
+os.environ['HF_HUB_CACHE'] = '/kaggle/tmp/hub'
+os.environ['HF_DATASETS_CACHE'] = '/kaggle/tmp/hf_cache'
+for path in ['/kaggle/tmp', '/kaggle/working']:
+    print(path, 'free GiB:', round(shutil.disk_usage(path).free / 2**30, 1))
 ```
 
----
+In a fresh notebook session, clone the repository and install dependencies:
 
-### Cell 2: Clone or Copy AeroFlow-v2 Codebase
 ```python
-# If running directly from git or Kaggle dataset
-!git clone https://github.com/your-org/ttx.git /kaggle/working/ttx || echo "Already cloned or present"
+!git clone https://github.com/PsychedelicPalimpsest/tts-aeroflow.git /kaggle/working/ttx
 %cd /kaggle/working/ttx
-!pip install -q soundfile scipy "datasets[audio]"
+!python -m pip install -q numpy scipy soundfile "datasets[audio]" pytest
+!python scripts/train_kaggle.py --help
+!python scripts/train_vocoder.py --help
 ```
 
----
+Keep the notebook's CUDA-compatible PyTorch installation. Record the repository
+commit and package versions with the run. On subsequent sessions, restore or
+clone the same code revision before resuming. All remaining shell examples can
+be pasted into notebook cells beginning with `%%bash`.
 
-### Cell 3: Execute Unit Tests & Dry-Run Verification
+Put checkpoints under `/kaggle/working` and preserve notebook outputs before the
+session ends. Caches under `/kaggle/tmp` are disposable. Distinct paths do not
+necessarily live on distinct storage devices. Downloading and preparing a full
+HF split can require space for both source shards and prepared Arrow data.
+Filtering speaker 9017 happens after loading the split and does not guarantee
+that only that speaker's audio will be downloaded.
+
+## 2. Supply complete datasets
+
+### LJSpeech
+
+Attach the complete LJSpeech dataset as a Kaggle input. Replace the example path
+`/kaggle/input/ljspeech-1-1/LJSpeech-1.1` below with the directory containing
+`metadata.csv`:
+
+```text
+LJSpeech-1.1/
+  metadata.csv
+  wavs/                 # audio/ is also supported
+    LJ001-0001.wav
+    LJ001-0002.wav
+    ...
+```
+
+Both trainers use the normalized transcript column, mix to mono, resample to
+24 kHz with an anti-aliasing filter and normalize peak level to 0.95. They filter
+out recordings outside their supported duration range. Stage A defaults to
+0.5–12 seconds for LJ; Stage B also excludes clips shorter than its crop length.
+If using Stage A's alternate metadata/audio-directory flags, arrange the same
+corpus in this standard layout for Stage B, whose CLI takes `--data-root`.
+
+Check the number of actual loadable recordings, not just metadata rows:
+
 ```python
-# Run unit test suite and system dry-run before launching distributed training
-!python3 -m pytest tests/test_aeroflow.py -v
-!python3 scripts/dry_run_train.py
-!python3 scripts/test_checkpoint_resumption.py
+from aeroflow.dataset.ljspeech import LJSpeechDataset
+lj = LJSpeechDataset('/kaggle/input/ljspeech-1-1/LJSpeech-1.1')
+print('Loadable LJ recordings after filtering:', len(lj))
 ```
 
----
+The local `/tmp/lj` used during development contained **five WAVs**, despite its
+13,100-row metadata file. It was suitable for diagnostics only. Do not use that
+small copy for a full training run.
 
-### Cell 4: Launch Distributed Multi-GPU Training via torchrun
+### HiFi speaker 9017
+
+Use the full [MikhailT/hifi-tts](https://huggingface.co/datasets/MikhailT/hifi-tts)
+repository, `clean` configuration, `train` split, and speaker `9017` throughout.
+The local checks used `MikhailT/hifi-tts-light`; its clean training split has only
+three clips for this speaker, so it is unsuitable for training a new voice.
+
+Stage A supports both cached map access (`--dataset-source hf`) and streaming
+(`--dataset-source hf-streaming`). Stage B currently requires cached map access;
+it does not support streaming or a local HiFi manifest. Budget disk space for
+that second stage before starting. Native HiFi audio is converted to 24 kHz by
+the adapter. The stage A examples cap clips at 10 seconds; Stage B caps at 12.
+
+For cached access, this reads metadata and reports the filtered count, but may
+first download and prepare the full requested split:
+
+```python
+from aeroflow.dataset.hf_hifi_tts import HuggingFaceHiFiTTSDataset
+hifi = HuggingFaceHiFiTTSDataset(
+    repo_id='MikhailT/hifi-tts', subset='clean', split='train',
+    speaker_ids=('9017',), cache_dir='/kaggle/tmp/hf_cache',
+    max_duration_s=10.0,
+)
+print('Loadable HiFi 9017 recordings:', len(hifi))
+```
+
+## 3. Stage A: train each model from scratch
+
+Use `--no-auto-resume`, a new output directory, and **no** `--resume-path` or
+`--finetune`. Merely changing the output directory is insufficient if automatic
+resume is enabled: it searches attached input datasets and other checkpoint
+folders too. `--finetune` starts from existing weights and is not scratch training.
+An explicitly requested checkpoint that does not exist now fails immediately.
+
+### New LJSpeech model
+
 ```bash
-%%bash
-# Launch Dual-T4 Distributed Training via torchrun
-# - 2 processes (1 per GPU)
-# - Batch size 16 per GPU (32 effective)
-# - Atomic checkpoints saved to /kaggle/working/checkpoints/
-# - Automatic resumption from existing checkpoints
-# - Watchdog limit: 11.2 hours
-
-torchrun --nproc_per_node=2 scripts/train_kaggle.py \
-    --manifest-path "/kaggle/input/hifi-tts-speaker-9017/manifest.json" \
-    --audio-dir "/kaggle/input/hifi-tts-speaker-9017/audio" \
-    --checkpoint-dir "/kaggle/working/checkpoints" \
-    --batch-size 16 \
-    --epochs 100 \
-    --lr 2e-4 \
-    --save-interval-steps 500 \
-    --max-hours 11.2 \
-    --auto-resume
+CUDA_VISIBLE_DEVICES=0 python scripts/train_kaggle.py \
+  --dataset-source ljspeech \
+  --ljspeech-root /kaggle/input/ljspeech-1-1/LJSpeech-1.1 \
+  --checkpoint-dir /kaggle/working/lj_joint \
+  --no-auto-resume \
+  --batch-size 8 --num-workers 2 --epochs 100 --lr 2e-4 \
+  --save-interval-steps 500 --sample-interval-steps 1000 \
+  --max-hours 10
 ```
 
----
+### New HiFi 9017 model
 
-### Cell 5: Test Voice Synthesis from Trained Checkpoint
-```python
-# Test audio generation from latest trained checkpoint
-import torch
-import soundfile as sf
-from aeroflow import AeroFlowTTS
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-model = AeroFlowTTS().to(device)
-ckpt_path = "/kaggle/working/checkpoints/checkpoint_latest.pt"
-
-if os.path.exists(ckpt_path):
-    print(f"Loading weights from {ckpt_path}...")
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model"])
-    model.eval()
-
-    test_prompt = "Peter Piper picked a peck of pickled peppers in the morning sun."
-    print(f"Synthesizing: '{test_prompt}'")
-    
-    with torch.no_grad():
-        audio_24k = model.synthesize(test_prompt, alpha=1.0)
-
-    out_file = "/kaggle/working/synthesized_output.wav"
-    sf.write(out_file, audio_24k.cpu().numpy(), 24000)
-    print(f"Generated {len(audio_24k) / 24000:.2f}s audio saved to {out_file}")
-
-    # Display audio player in notebook
-    import IPython.display as ipd
-    ipd.display(ipd.Audio(out_file, rate=24000))
-else:
-    print("Checkpoint not found yet. Run Cell 4 to begin training.")
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_kaggle.py \
+  --dataset-source hf --hf-repo-id MikhailT/hifi-tts \
+  --hf-subset clean --hf-split train --hf-speaker 9017 \
+  --hf-cache-dir /kaggle/tmp/hf_cache \
+  --checkpoint-dir /kaggle/working/hifi9017_joint \
+  --no-auto-resume \
+  --batch-size 8 --num-workers 2 --epochs 100 --lr 2e-4 \
+  --save-interval-steps 500 --sample-interval-steps 1000 \
+  --max-hours 10
 ```
 
----
+Choose a `--max-hours` value shorter than your actual session allowance, allowing
+for dataset setup and output preservation. The stage A watchdog starts after
+setup, so download time is not included. Batch size 8 is an initial setting, not
+a measured memory guarantee; reduce it if needed. Keep one voice per run.
 
-## 5. Checkpoint Structure & Atomic Integrity
+For streaming HiFi, replace `--dataset-source hf` with `hf-streaming` and add
+`--steps-per-epoch 1000 --hf-shuffle-buffer 1000`. A streaming epoch then means a
+configured number of batches, not one complete corpus pass. Track update counts
+and data exposure when comparing runs. This does not enable streaming in Stage B.
 
-Every checkpoint saved by `train_kaggle.py` contains:
+Stage A writes `checkpoint_latest.pt`, `checkpoint_best.pt` and listening samples.
+Its “best” is selected from a single training batch's combined loss, not held-out
+perceptual quality. Keep checkpoints with their fixed listening samples. Before
+Stage B, require intelligible, stable text output and recognizable reconstruction
+from recordings. If text alignment or pronunciation is broken, decoder-only
+training cannot repair it. A robotic texture persisting after otherwise stable
+training is a reason to evaluate Stage B rather than blindly extend Stage A.
 
-```python
-{
-    "model": model.state_dict(),             # Unwrapped from DDP
-    "optimizer": optimizer.state_dict(),     # AdamW momentum & velocity moments
-    "scaler": scaler.state_dict(),           # FP16 GradScaler dynamic scale factor
-    "scheduler": scheduler.state_dict(),     # CosineAnnealingLR step counter
-    "global_step": 12500,                    # Total steps executed across all sessions
-    "epoch": 14,                             # Completed epochs
-    "best_loss": 5.4210,                     # All-time minimum convex spectral loss
-    "rng_state": {
-        "cpu": ...,                          # PyTorch CPU RNG state
-        "cuda": ...,                         # PyTorch CUDA RNG states across all GPUs
-        "numpy": ...,                        # NumPy RNG state
-        "python": ...                        # Python standard library random state
-    },
-    "timestamp": 1726418400.0                # Epoch timestamp
-}
+## 4. Resume Stage A across sessions
+
+Save the previous run's outputs and attach them as a Kaggle input. Use an
+**explicit** matching checkpoint, repeat the same dataset and training settings,
+and write new outputs under `/kaggle/working`. For example:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_kaggle.py \
+  --dataset-source ljspeech \
+  --ljspeech-root /kaggle/input/ljspeech-1-1/LJSpeech-1.1 \
+  --resume-path /kaggle/input/lj-joint-run/lj_joint/checkpoint_latest.pt \
+  --checkpoint-dir /kaggle/working/lj_joint \
+  --no-auto-resume \
+  --batch-size 8 --num-workers 2 --epochs 100 --lr 2e-4 \
+  --save-interval-steps 500 --sample-interval-steps 1000 \
+  --max-hours 10
 ```
 
-### Resumption Sequence Across Multiple Kaggle Runs
+For HiFi, use the dataset/cache flags from its fresh-run command and the saved
+`hifi9017_joint/checkpoint_latest.pt`. `--epochs` is the total target, not an
+additional number of epochs. The trainer restores optimizer, scaler, scheduler,
+step, epoch and RNG; it does not save an exact mid-epoch batch cursor, so some data
+may repeat when resuming an interrupted epoch.
 
-```mermaid
-flowchart TD
-    A["Launch Kaggle Session 1"] --> B["Train on 2x T4 for 11.2 Hours"]
-    B --> C["Watchdog Triggers at 11.2h: Saves checkpoint_latest.pt atomically"]
-    C --> D["Clean Exit Code 0 -> Kaggle Commits Output Dataset"]
-    D --> E["Launch Kaggle Session 2 (Attach Session 1 Output)"]
-    E --> F["auto-resume finds /kaggle/input/**/checkpoint_latest.pt"]
-    F --> G["Restores Model, Optimizer, Scaler, RNG States -> Resumes Step N+1"]
-    G --> H["Train for another 11.2 Hours until full convergence!"]
+If extending training beyond the original epoch budget, choose a new total
+`--epochs` and use `--reset-lr --lr <chosen-rate>` to reinitialize the cosine
+schedule for the remaining epochs. This option also clears optimizer momentum.
+Simply changing `--epochs` while restoring the old scheduler does not extend its
+saved cosine period. Avoid `--finetune` when continuing the same run: it resets
+step and epoch bookkeeping as well as optimizer state.
+
+## 5. Stage B: train the acoustic decoder for each new model
+
+Start from that voice's Stage A checkpoint, using a separate output directory.
+There is no need to load any older pretrained voice. Select a checkpoint after
+reviewing its samples; the examples use the latest one.
+
+### LJSpeech decoder
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_vocoder.py \
+  --dataset lj --data-root /kaggle/input/ljspeech-1-1/LJSpeech-1.1 \
+  --checkpoint /kaggle/working/lj_joint/checkpoint_latest.pt \
+  --output /kaggle/working/lj_vocoder --device cuda \
+  --steps 100000 --batch-size 4 --workers 2 --threads 2 \
+  --save-every 250 --validate-every 1000 --validation-items 16
 ```
 
----
+### HiFi 9017 decoder
 
-## 6. Training Verification Checklist
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_vocoder.py \
+  --dataset hifi --hf-repo MikhailT/hifi-tts --hf-split train --speaker 9017 \
+  --cache-dir /kaggle/tmp/hf_cache \
+  --checkpoint /kaggle/working/hifi9017_joint/checkpoint_latest.pt \
+  --output /kaggle/working/hifi9017_vocoder --device cuda \
+  --steps 100000 --batch-size 4 --workers 2 --threads 2 \
+  --save-every 250 --validate-every 1000 --validation-items 16
+```
 
-Before leaving training to run overnight:
-- [x] All 17 unit tests pass: `python3 -m pytest tests/test_aeroflow.py -v` (Exit code 0).
-- [x] System verification dry-run passes: `python3 scripts/dry_run_train.py` (Exit code 0).
-- [x] Checkpoint atomicity & resumption test passes: `python3 scripts/test_checkpoint_resumption.py` (Exit code 0).
-- [x] `NCCL_P2P_DISABLE=1` and `NCCL_IB_DISABLE=1` are exported in the environment.
-- [x] `--max-hours 11.2` is configured to ensure clean exit before Kaggle's 12.0h hard timeout.
+If starting Stage B in a later notebook session, replace `--checkpoint` with the
+Stage A file under its attached `/kaggle/input/...` location. Note the different
+flag names: Stage A uses `--hf-repo-id`/`--hf-speaker`/`--hf-cache-dir`; Stage B
+uses `--hf-repo`/`--speaker`/`--cache-dir`.
+
+Stage B uses more memory for its training-only critics. Start with batch size 4
+and adjust to measured memory. The full utterance is reconstructed before valid
+0.68-second waveform crops are selected for losses; a short crop does not cap the
+memory needed for the complete decoder pass.
+
+Stage B **does not have a wall-clock watchdog**. Set a session-sized total step
+target from observed throughput, use frequent saves, and preserve outputs before
+the session expires. The 100,000-step example is a total experimental budget
+across sessions, not a promise that one notebook session will finish it. An
+interrupted run can resume from its last completed atomic save.
+
+## 6. Resume Stage B and choose a final model
+
+Resume from **Stage B's** `checkpoint_latest.pt`, repeating its original
+configuration. For LJ:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_vocoder.py \
+  --dataset lj --data-root /kaggle/input/ljspeech-1-1/LJSpeech-1.1 \
+  --resume /kaggle/input/lj-vocoder-run/lj_vocoder/checkpoint_latest.pt \
+  --output /kaggle/working/lj_vocoder --device cuda \
+  --steps 100000 --batch-size 4 --workers 2 --threads 2 \
+  --save-every 250 --validate-every 1000 --validation-items 16
+```
+
+For HiFi, use the dataset/cache flags from its Stage B command and its own
+`hifi9017_vocoder/checkpoint_latest.pt`. `--steps` counts total decoder updates,
+including previous sessions. Do not supply `--checkpoint` together with `--resume`.
+Resume validates the configuration and dataset filename order; keep data paths,
+filtering and seed consistent. It restores both optimizers, discriminators,
+scalers and RNG, with step-derived sampling and crops.
+
+| File | Purpose |
+|---|---|
+| Stage A `checkpoint_latest.pt` | Resume Stage A or initialize Stage B |
+| Stage B `checkpoint_latest.pt` | Resume Stage B; includes training critics/optimizers |
+| Stage B `model_latest.pt` | Latest evaluated model for inference |
+| Stage B `model_best_mel.pt` | Lowest validation mel loss, potentially the untouched baseline |
+| Stage B `split.json`, `config.json`, `train.jsonl` | Data split, run settings, loss history |
+| Stage B `baseline/`, `validation_*/` | Metrics, original/reconstructed audio and fixed-seed text samples |
+
+Keep the baseline and earlier best-mel exports when attaching runs in later
+sessions; the resume command restores training state but does not copy older
+listening folders or exports into the new output directory. Do not resume the
+legacy Stage A objective after finishing Stage B: it can undo decoder training.
+Inference exports lack the optimizer state expected by Stage A.
+
+Listen to original/reconstruction pairs and fixed text samples at each validation.
+Magnitude metrics are not perceptual scores. Stage B reserves validation clips
+from its own updates; those recordings may have been used by Stage A. For a truly
+unseen final evaluation, reserve recordings outside both stages. The current
+Stage A trainer has no built-in held-out validation split.
+
+Synthesize with an explicitly selected final checkpoint:
+
+```bash
+python -m aeroflow 'The sound of the wind was soft and low.' \
+  --checkpoint /kaggle/working/lj_vocoder/model_latest.pt \
+  --device cuda -o /kaggle/working/lj_sample.wav
+
+python -m aeroflow 'The sound of the wind was soft and low.' \
+  --checkpoint /kaggle/working/hifi9017_vocoder/model_latest.pt \
+  --device cuda -o /kaggle/working/hifi9017_sample.wav
+```
+
+Compare the raw model output without VoiceFixer or phase refinement first. An
+optional restoration pass should not hide whether the decoder training helped.
+
+## Optional pronunciation audit
+
+If pronunciations are a separate problem, run the audit before Stage A and
+review a small sample before applying it to the corpus:
+
+```bash
+python -m pip install cmudict transformers faster-whisper
+python scripts/audit_pronunciations.py \
+  --source hf-streaming --hf-repo-id MikhailT/hifi-tts --hf-speaker 9017 \
+  --limit 200 --output /kaggle/working/pronunciation_sample.jsonl \
+  --lexicon-output /kaggle/working/pronunciation_lexicon.json
+```
+
+For LJ, replace the source flags with `--source ljspeech --ljspeech-root <root>`.
+After inspecting decisions, omit `--limit` for a full audit. Preserve its output
+and add `--pronunciation-manifest <file.jsonl>` to Stage A with the same corpus,
+speaker and split. For larger audits, `--new-items` and `--resume-from` allow
+continuation. See [PRONUNCIATION_AUDIT_REAL_DATA.md](PRONUNCIATION_AUDIT_REAL_DATA.md)
+and [PRONUNCIATION_AUDIT_LJSPEECH.md](PRONUNCIATION_AUDIT_LJSPEECH.md) for results
+and limitations. The decoder trainer does not consume the audit manifest.
+
+## Optional implementation checks
+
+Before a long GPU run, the local behavioral suite can be run with:
+
+```bash
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python -m pytest tests -q -k 'not integration'
+```
+
+For a short decoder plumbing check, use a Stage A checkpoint with complete
+matching data and lower `--steps`, `--batch-size` and `--validation-items` in a
+separate output directory. Small-critic or tiny-dataset diagnostic checkpoints
+are not production voices. Full GPU/AMP validation remains necessary on the
+actual training hardware.

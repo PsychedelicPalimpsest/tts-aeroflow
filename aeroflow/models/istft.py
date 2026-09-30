@@ -30,7 +30,8 @@ class iSTFTSynthesizer(nn.Module):
     def forward(
         self,
         S_complex: torch.Tensor,
-        length: Optional[int] = None
+        length: Optional[int] = None,
+        lengths: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         S_complex: [B, 513, T] complex STFT tensor
@@ -43,6 +44,20 @@ class iSTFTSynthesizer(nn.Module):
         assert S_complex.shape[1] == self.n_fft // 2 + 1, (
             f"Expected {self.n_fft // 2 + 1} frequency bins, got {S_complex.shape[1]}"
         )
+
+        if lengths is not None:
+            counts = lengths.detach().cpu().tolist()
+            if len(counts) != S_complex.shape[0] or any(n < 1 for n in counts):
+                raise ValueError("lengths must contain a positive length for each spectrum")
+            total = length if length is not None else max(counts)
+            if total < max(counts):
+                raise ValueError("Output length is shorter than a recording")
+            return torch.cat([
+                torch.nn.functional.pad(
+                    self(S_complex[i:i + 1, :, :1 + n // self.hop_length], length=n),
+                    (0, total - n),
+                ) for i, n in enumerate(counts)
+            ])
 
         audio = torch.istft(
             S_complex,
@@ -103,7 +118,8 @@ class STFTAnalysis(nn.Module):
     @torch.amp.autocast('cuda', enabled=False)
     def forward(
         self,
-        audio: torch.Tensor
+        audio: torch.Tensor,
+        lengths: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         audio: [B, N_samples] 24 kHz waveform
@@ -115,6 +131,21 @@ class STFTAnalysis(nn.Module):
         audio = audio.float()
         if audio.dim() == 1:
             audio = audio.unsqueeze(0)
+
+        if lengths is not None:
+            # Centered STFT must reflect each recording's own endpoint, not
+            # a padded batch endpoint. Zero-pad spectra only after analysis.
+            if lengths.shape != (audio.shape[0],):
+                raise ValueError("lengths must contain one sample count per recording")
+            counts = lengths.detach().cpu().tolist()
+            if any(n <= self.n_fft // 2 or n > audio.shape[-1] for n in counts):
+                raise ValueError("Audio lengths must exceed n_fft/2 and fit the batch")
+            frames = 1 + audio.shape[-1] // self.hop_length
+            spectra = [self(audio[i:i + 1, :n])[0] for i, n in enumerate(counts)]
+            S_complex = torch.cat([
+                torch.nn.functional.pad(s, (0, frames - s.shape[-1])) for s in spectra
+            ])
+            return S_complex, S_complex.abs(), torch.angle(S_complex)
 
         S_complex = torch.stft(
             audio,

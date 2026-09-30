@@ -1,4 +1,9 @@
 # PhyGlot-TTS: Physics-Constrained Differentiable Glottal Source-Filter Synthesis
+
+> Historical alternative architecture proposal, not the implemented AeroFlow
+> training system. Use [KAGGLE_TRAINING_GUIDE.md](KAGGLE_TRAINING_GUIDE.md) for
+> current LJSpeech and HiFi workflows. The guarantees below are proposal claims.
+
 ## Technical Architecture Specification & Implementation Blueprint (Track Alpha)
 
 **Target Hardware:** 12th Gen Intel Core i7-12700H (6 P-cores + 8 E-cores, 20 threads, 32 GB RAM, AVX2, AVX-VNNI)  

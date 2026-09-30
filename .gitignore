@@ -58,6 +58,8 @@ temp_kaggle_ckpt/
 logs/
 wandb/
 artifacts/tts_diagnosis/
+artifacts/timbre_investigation_20260930/
+artifacts/vocoder_repair_*/
 
 # Audio files (ignore audio data/outputs except dry-run test artifact)
 *.wav

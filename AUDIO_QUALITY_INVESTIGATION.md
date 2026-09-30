@@ -1,5 +1,11 @@
 # Checkpoint audio investigation — 2026-09-28
 
+This is the historical investigation of an earlier checkpoint. For the later
+padding fix and decoder training work, see [VOCODER_REPAIR.md](VOCODER_REPAIR.md).
+For new models on either corpus, follow
+[KAGGLE_TRAINING_GUIDE.md](KAGGLE_TRAINING_GUIDE.md); its two-stage workflow
+supersedes the next-training recommendation near the end of this report.
+
 Checkpoint: `/home/mitch/Downloads/checkpoint_best.pt`, loaded strictly with all
 257 state entries matching. Training metadata: step 8,000, epoch 142, best loss
 1.911767. SHA-256:

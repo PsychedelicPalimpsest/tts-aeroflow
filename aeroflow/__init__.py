@@ -7,7 +7,7 @@ Champion architecture featuring:
 - 6-Step Non-Uniform Heun Solver with polynomial schedule (rho = 1.5).
 - ConvNeXt-V2 Complex STFT Decoder (Log-Mag + Unit Phase Vectors).
 - Alias-Free Constant Overlap-Add (COLA) iSTFT Synthesis.
-- 100% Non-Adversarial Convex Spectral Training Suite.
+- Spectral training objectives and a separate adversarial decoder repair trainer.
 """
 
 from aeroflow.frontend.text_norm import TextNormalizer

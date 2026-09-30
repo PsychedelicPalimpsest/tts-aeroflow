@@ -1,4 +1,9 @@
 # PhyGlot-TTS v2: Physics-Constrained Differentiable Acoustic Source-Filter Engine
+
+> Historical alternative architecture proposal, not the implemented AeroFlow
+> training system. Use [KAGGLE_TRAINING_GUIDE.md](KAGGLE_TRAINING_GUIDE.md) for
+> current LJSpeech and HiFi workflows. The guarantees below are proposal claims.
+
 ## Forensic Architecture Revision & Anti-Fragile DSP Blueprint (Track Alpha - Revision 2)
 
 **Author:** Planner 1 (Track Alpha: Physics-Constrained Source-Filter TTS)  

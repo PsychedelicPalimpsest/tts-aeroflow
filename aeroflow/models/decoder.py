@@ -7,10 +7,11 @@ Features:
 - Guaranteed unit-norm phase projection eliminating phase wrap discontinuities.
 """
 
-from typing import Tuple
+from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from aeroflow.models.masking import mask_frames
 
 
 class GRN(nn.Module):
@@ -21,12 +22,12 @@ class GRN(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1, dim, 1))
         self.beta = nn.Parameter(torch.zeros(1, dim, 1))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         # x: [B, dim, T]
         # Compute L2 norm across temporal dimension
-        Gx = torch.norm(x, p=2, dim=-1, keepdim=True)  # [B, dim, 1]
+        Gx = torch.norm(mask_frames(x, mask).float(), p=2, dim=-1, keepdim=True).to(x.dtype)
         Nx = Gx / (Gx.mean(dim=1, keepdim=True) + 1e-5)  # [B, dim, 1]
-        return self.gamma * (x * Nx) + self.beta + x
+        return mask_frames(self.gamma * (x * Nx) + self.beta + x, mask)
 
 
 class ConvNeXtV2Block(nn.Module):
@@ -44,16 +45,16 @@ class ConvNeXtV2Block(nn.Module):
         self.grn = GRN(dim * 4)
         self.pwconv2 = nn.Conv1d(dim * 4, dim, kernel_size=1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         # x: [B, dim, T]
         res = x
         x = self.dwconv(x)
         x = self.norm(x.transpose(1, 2)).transpose(1, 2)
         x = self.pwconv1(x)
         x = self.act(x)
-        x = self.grn(x)
+        x = self.grn(x, mask)
         x = self.pwconv2(x)
-        return res + x
+        return mask_frames(res + x, mask)
 
 
 class ComplexSTFTDecoder(nn.Module):
@@ -84,7 +85,8 @@ class ComplexSTFTDecoder(nn.Module):
 
     def forward(
         self,
-        z: torch.Tensor
+        z: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         z: [B, 32, T] acoustic latent tensor
@@ -94,9 +96,9 @@ class ComplexSTFTDecoder(nn.Module):
             cos_phi: [B, num_bins, T] unit-norm real phase component
             sin_phi: [B, num_bins, T] unit-norm imaginary phase component
         """
-        h = self.in_proj(z)
+        h = mask_frames(self.in_proj(mask_frames(z, mask)), mask)
         for block in self.blocks:
-            h = block(h)
+            h = block(h, mask)
         out = self.out_proj(h)
 
         log_mag, pr, pi = out.chunk(3, dim=1)
@@ -106,12 +108,16 @@ class ComplexSTFTDecoder(nn.Module):
         mag = torch.exp(log_mag_clamped)
 
         # Unit-vector projection for continuous phase angle (eliminates phase wrapping)
-        phase_norm = torch.clamp(torch.sqrt(pr ** 2 + pi ** 2), min=1e-4)
+        # Keep phase projection in FP32 and avoid sqrt's singular derivative
+        # at zero. This remains compatible with the existing output head.
+        pr, pi = pr.float(), pi.float()
+        mag = mag.float()
+        phase_norm = torch.sqrt((pr ** 2 + pi ** 2).clamp_min(1e-8))
         cos_phi = pr / phase_norm
         sin_phi = pi / phase_norm
 
         real = mag * cos_phi
         imag = mag * sin_phi
-        S_complex = torch.complex(real, imag)
+        S_complex = mask_frames(torch.complex(real, imag), mask)
 
         return S_complex, mag, cos_phi, sin_phi

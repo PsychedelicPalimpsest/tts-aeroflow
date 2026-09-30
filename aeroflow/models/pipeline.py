@@ -30,6 +30,7 @@ from aeroflow.models.flow_matching import (
 )
 from aeroflow.models.decoder import ComplexSTFTDecoder
 from aeroflow.models.istft import iSTFTSynthesizer, STFTAnalysis
+from aeroflow.models.masking import mask_frames, masked_group_norm, frame_mask as make_frame_mask
 
 
 class AcousticLatentEncoder(nn.Module):
@@ -47,15 +48,15 @@ class AcousticLatentEncoder(nn.Module):
         self.out_proj = nn.Conv1d(hidden_dim, latent_dim, kernel_size=1)
         self.out_norm = nn.LayerNorm(latent_dim)
 
-    def forward(self, mag: torch.Tensor) -> torch.Tensor:
+    def forward(self, mag: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         # mag: [B, 513, T]
         # Operate in log-magnitude space for linear dynamic range
-        log_mag = torch.log(mag.clamp(min=1e-5))
-        h = F.gelu(self.norm1(self.conv1(log_mag)))
-        h = F.gelu(self.norm2(self.conv2(h)))
+        log_mag = mask_frames(torch.log(mag.clamp(min=1e-5)), mask)
+        h = F.gelu(masked_group_norm(self.conv1(log_mag), self.norm1, mask))
+        h = F.gelu(masked_group_norm(self.conv2(h), self.norm2, mask))
         z = self.out_proj(h)  # [B, 32, T]
         z = self.out_norm(z.transpose(1, 2)).transpose(1, 2)
-        return z
+        return mask_frames(z, mask)
 
 
 class AeroFlowTTS(nn.Module):
@@ -173,9 +174,8 @@ class AeroFlowTTS(nn.Module):
         text_proj = self.text_to_latent_proj(H_text)  # [B, N, latent_dim]
 
         # 2. Extract ground-truth STFT and acoustic latents
-        S_gt, mag_gt, phase_gt = self.stft_analysis(audio_24k)
+        S_gt, mag_gt, phase_gt = self.stft_analysis(audio_24k, lengths=audio_lengths)
         T_frames = S_gt.shape[-1]
-        z_target = self.acoustic_encoder(mag_gt)  # [B, 32, T_frames]
 
         # Exact centered STFT frame count: 1 + audio_lengths // hop_length
         if text_lengths is None:
@@ -190,6 +190,8 @@ class AeroFlowTTS(nn.Module):
             audio_mask = time_idx < audio_lengths.unsqueeze(1)
             frame_idx = torch.arange(T_frames, device=device).unsqueeze(0).expand(B, -1)
             frame_mask = frame_idx < frame_lengths.unsqueeze(1)
+
+        z_target = self.acoustic_encoder(mag_gt, frame_mask)
 
         # 3. Monotonic Alignment Search (Viterbi MAS)
         with torch.no_grad():
@@ -219,8 +221,8 @@ class AeroFlowTTS(nn.Module):
         v_pred = self.vector_field(x_t, t, C)
 
         # 7. Complex STFT Reconstruction & Alias-Free iSTFT
-        S_hat, mag_hat, cos_hat, sin_hat = self.decoder(z_target)
-        audio_hat = self.istft(S_hat, length=audio_24k.shape[-1])
+        S_hat, mag_hat, cos_hat, sin_hat = self.decoder(z_target, frame_mask)
+        audio_hat = self.istft(S_hat, length=audio_24k.shape[-1], lengths=audio_lengths)
 
         return {
             "v_pred": v_pred,
@@ -237,6 +239,14 @@ class AeroFlowTTS(nn.Module):
             "S_gt": S_gt,
             "S_hat": S_hat
         }
+
+    def reconstruct(self, audio: torch.Tensor, lengths: Optional[torch.Tensor] = None):
+        """Reconstruct recordings without text/flow, respecting batch boundaries."""
+        spectrum, magnitude, _ = self.stft_analysis(audio, lengths=lengths)
+        mask = None if lengths is None else make_frame_mask(lengths, spectrum.shape[-1], self.hop_length)
+        z = self.acoustic_encoder(magnitude, mask)
+        predicted = self.decoder(z, mask)[0]
+        return self.istft(predicted, length=audio.shape[-1], lengths=lengths)
 
     @torch.no_grad()
     def synthesize(

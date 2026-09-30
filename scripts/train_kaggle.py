@@ -469,7 +469,8 @@ def train():
                              "kills padding waste and stabilizes step times).")
     parser.add_argument("--checkpoint-dir", type=str, default="/kaggle/working/checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--resume-path", type=str, default=None, help="Explicit checkpoint path to resume from")
-    parser.add_argument("--auto-resume", action="store_true", default=True, help="Auto-search for existing checkpoints")
+    parser.add_argument("--auto-resume", action=argparse.BooleanOptionalAction, default=True,
+                        help="Auto-search for existing checkpoints; use --no-auto-resume for a new model")
     parser.add_argument("--reset-lr", action="store_true", default=False,
                         help="Reset learning rate and scheduler when resuming from checkpoint (uses --lr).")
     parser.add_argument("--finetune", action="store_true", default=False,
@@ -496,6 +497,9 @@ def train():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--synthetic-samples", type=int, default=200, help="Samples for synthetic fallback dataset")
     args = parser.parse_args()
+
+    if args.resume_path and not Path(args.resume_path).is_file():
+        parser.error(f"Resume checkpoint does not exist: {args.resume_path}")
 
     # 1. Environment & DDP Setup
     device, rank, world_size, local_rank, is_distributed = setup_environment(seed=args.seed)

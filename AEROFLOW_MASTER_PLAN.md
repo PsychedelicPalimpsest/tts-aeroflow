@@ -1,4 +1,12 @@
 # AeroFlow-v2 Master Engineering Specification & Implementation Plan
+
+> Historical design proposal, superseded for training by
+> [KAGGLE_TRAINING_GUIDE.md](KAGGLE_TRAINING_GUIDE.md) and
+> [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md). Claims below of convex neural
+> training, guaranteed artifact elimination and measured-quality/speed targets
+> are not established. New models use joint training followed by an adversarial
+> decoder stage; see [VOCODER_REPAIR.md](VOCODER_REPAIR.md).
+
 **Tournament Champion Architecture — Track Beta**  
 **Lead Architect:** Planner 2 (TTS Systems Architect & Speech Scientist)  
 **Target Architecture:** Intel® Core™ i7-12700H (6 P-cores + 8 E-cores, 20 threads, AVX2 / AVX-VNNI), 32 GB RAM  
