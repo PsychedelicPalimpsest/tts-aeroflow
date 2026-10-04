@@ -143,8 +143,9 @@ class AeroFlowTTS(nn.Module):
 
         z_t = z_target.transpose(1, 2)               # [B, T, 32]
 
-        # Compute negative L2 distance matrix
-        dist = torch.cdist(text_proj, z_t, p=2.0)    # [B, N, T]
+        # MAS is non-differentiable; keep distance scores in FP32 under AMP.
+        with torch.amp.autocast(device_type=text_proj.device.type, enabled=False):
+            dist = torch.cdist(text_proj.float(), z_t.float(), p=2.0)  # [B, N, T]
         neg_dist = -0.5 * (dist ** 2)
 
         # TorchScript-compiled MAS: dozens of launches instead of ~20k.

@@ -77,6 +77,23 @@ def test_viterbi_mas():
     assert (durations[0] >= 1.0).all()
 
 
+def test_mas_alignment_mixed_precision():
+    model = AeroFlowTTS()
+    text_repr = torch.randn(1, 4, model.latent_dim, dtype=torch.float16)
+    z_target = torch.randn(1, model.latent_dim, 12, dtype=torch.float32)
+    lengths = torch.tensor([4])
+    frame_lengths = torch.tensor([12])
+
+    with torch.amp.autocast("cpu", dtype=torch.bfloat16):
+        path, durations = model.compute_mas_alignment(
+            text_repr, z_target, lengths, frame_lengths
+        )
+
+    assert path.shape == (1, 4, 12)
+    assert durations.sum().item() == 12
+    assert torch.isfinite(path).all()
+
+
 def test_duration_predictor():
     pred = EnergyConstrainedDurationPredictor(text_dim=192)
     H = torch.randn(2, 10, 192)
